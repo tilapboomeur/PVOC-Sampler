@@ -1,0 +1,61 @@
+name: Construire les plugins (macOS)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tests (compilation separee)
+        run: |
+          cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release -DPVOC_TESTS=ON -DCMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build-tests --config Release -j 4 --target pvoc_effect_test pvoc_scrub_test pvoc_plugin_test pvoc_sampler_test
+          ./build-tests/pvoc_effect_test
+          ./build-tests/pvoc_scrub_test
+          ./build-tests/pvoc_plugin_test
+          ./build-tests/pvoc_sampler_test
+
+      - name: Compilation des plugins (binaire universel Apple Silicon + Intel)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j 4
+
+      - name: Signature ad hoc
+        run: |
+          for P in "LecteurPVoc:Lecteur PVoc" "SamplerPVoc:Sampler PVoc"; do
+            T="${P%%:*}"; N="${P#*:}"
+            cd "$GITHUB_WORKSPACE/build/${T}_artefacts/Release"
+            codesign --force --deep --sign - "AU/$N.component"
+            codesign --force --deep --sign - "VST3/$N.vst3"
+            codesign --force --deep --sign - "Standalone/$N.app"
+          done
+
+      - name: Validation Apple (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build/LecteurPVoc_artefacts/Release/AU/Lecteur PVoc.component" ~/Library/Audio/Plug-Ins/Components/
+          cp -R "build/SamplerPVoc_artefacts/Release/AU/Sampler PVoc.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          auval -v aufx Pvoc Lpvc
+          auval -v aumu Pvsm Lpvc
+
+      - name: Archive
+        run: |
+          mkdir -p dist
+          for P in "LecteurPVoc:Lecteur PVoc:Lecteur-PVoc" "SamplerPVoc:Sampler PVoc:Sampler-PVoc"; do
+            T="${P%%:*}"; R="${P#*:}"; N="${R%%:*}"; Z="${R#*:}"
+            cd "$GITHUB_WORKSPACE/build/${T}_artefacts/Release"
+            ditto -c -k --keepParent "AU/$N.component" "$GITHUB_WORKSPACE/dist/$Z-AU.zip"
+            ditto -c -k --keepParent "VST3/$N.vst3" "$GITHUB_WORKSPACE/dist/$Z-VST3.zip"
+            ditto -c -k --keepParent "Standalone/$N.app" "$GITHUB_WORKSPACE/dist/$Z-App.zip"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PVoc-plugins-macOS
+          path: dist/*.zip
