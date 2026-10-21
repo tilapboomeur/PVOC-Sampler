@@ -25,7 +25,32 @@ struct ZoneSettings {
     float start = 0.0f;         // point de depart, en % du son
     float tuneCents = 0.0f;     // accord fin
     bool autoRange = true;      // plage calculee automatiquement a partir des notes de base
+
+    // ----- enveloppe de position (ADSR sur la position de lecture, facon scrub)
+    bool posEnv = false;
+    float pStart = 0.0f;        // position au debut de la note (%)
+    float pPeak = 50.0f;        // position atteinte a la fin de l'attaque (%)
+    float pSustain = 50.0f;     // position tenue pendant le maintien (%)
+    float pEnd = 100.0f;        // position atteinte a la fin du relachement (%)
+    float aMs = 500.0f, dMs = 500.0f, rMs = 1000.0f;
+
+    // ----- LFO sur la position (actif avec l'enveloppe)
+    bool lfo = false;
+    int lfoShape = 0;           // 0 sinus, 1 triangle, 2 aleatoire doux
+    float lfoRate = 0.5f;       // Hz
+    float lfoDepth = 3.0f;      // % du son, de part et d'autre
 };
+
+/** Position (0..1) de l'enveloppe, sans LFO, pour l'affichage et les voix. stage : 0 A, 1 D, 2 S, 3 R. */
+inline float posEnvValue(const ZoneSettings& s, int stage, float tMs, float releaseFrom) {
+    auto lerp = [](float a, float b, float x) { return a + (b - a) * juce::jlimit(0.0f, 1.0f, x); };
+    switch (stage) {
+        case 0: return 0.01f * (s.aMs <= 0.0f ? s.pPeak : lerp(s.pStart, s.pPeak, tMs / s.aMs));
+        case 1: return 0.01f * (s.dMs <= 0.0f ? s.pSustain : lerp(s.pPeak, s.pSustain, tMs / s.dMs));
+        case 2: return 0.01f * s.pSustain;
+        default: return s.rMs <= 0.0f ? 0.01f * s.pEnd : lerp(releaseFrom, 0.01f * s.pEnd, tMs / s.rMs);
+    }
+}
 
 /** Ce que le thread audio voit d'une zone. */
 struct ZoneSnapshot {

@@ -65,6 +65,8 @@ public:
     juce::String getLastError() const;
 
     int getActiveVoices() const { return activeVoices.load(); }
+    /** Pour les tests : rend le LFO aleatoire reproductible. */
+    void setRandomSeed(juce::int64 seed) { lfoRandom.setSeed(seed); }
     /** Notes en cours (pour l'affichage), bit n = note n. */
     std::array<uint64_t, 2> getSoundingNotes() const { return { soundingLo.load(), soundingHi.load() }; }
 
@@ -94,6 +96,14 @@ private:
         uint64_t age = 0;
         pvoc::ZoneSettings s;
         std::shared_ptr<const pvoc::PlayerBuffer> buffer;
+        // enveloppe de position : -1 = inactive, 0 A, 1 D, 2 S, 3 R
+        int penvStage = -1;
+        float penvT = 0.0f;           // ms ecoulees dans l'etape
+        float relFrom = 0.0f;         // position au debut du relachement (0..1)
+        float lastEnvPos = 0.0f;      // derniere position de l'enveloppe, sans LFO (0..1)
+        bool penvDone = false;        // relachement de position termine
+        double lfoPhase = 0.0;        // en cycles
+        float lfoA = 0.0f, lfoB = 0.0f;
     };
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -104,6 +114,8 @@ private:
     void noteOn(int note, float velocity);
     void noteOff(int note);
     void releaseVoice(Voice& v);
+    void startAmpRelease(Voice& v);
+    float positionEnvelope(Voice& v, int n);   // position (0..1) pour ce bloc, LFO compris
     void killVoice(Voice& v);
     void renderVoices(float* outL, float* outR, int n);
     void applyVoiceSettings(Voice& v);
@@ -132,6 +144,7 @@ private:
     float pitchBend = 0.0f;   // en demi-tons
     double currentRate = 48000.0;
     std::vector<float> tmpL, tmpR;
+    juce::Random lfoRandom;
     std::atomic<int> activeVoices { 0 };
     std::atomic<uint64_t> soundingLo { 0 }, soundingHi { 0 };
 

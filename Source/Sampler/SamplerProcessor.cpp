@@ -352,7 +352,18 @@ void SamplerProcessor::noteOn(int note, float velocity) {
         v.eng->setPlayerBuffer(v.buffer);
         v.eng->setScrubTime(pSmooth->load());
         applyVoiceSettings(v);
-        if (pFollow->load() > 0.5f) v.eng->seek(pPosition->load() / 100.0);
+        v.penvStage = -1;
+        v.penvDone = false;
+        if (v.s.posEnv) {
+            // la position suit l'enveloppe des le debut de la note
+            v.penvStage = 0;
+            v.penvT = 0.0f;
+            v.lfoPhase = 0.0;
+            v.lfoA = lfoRandom.nextFloat() * 2.0f - 1.0f;
+            v.lfoB = lfoRandom.nextFloat() * 2.0f - 1.0f;
+            v.lastEnvPos = pvoc::posEnvValue(v.s, 0, 0.0f, 0.0f);
+            v.eng->seek(v.lastEnvPos);
+        } else if (pFollow->load() > 0.5f) v.eng->seek(pPosition->load() / 100.0);
         else v.eng->seek(v.s.start / 100.0);
         v.eng->play();
     }
@@ -369,6 +380,20 @@ void SamplerProcessor::noteOff(int note) {
 
 void SamplerProcessor::releaseVoice(Voice& v) {
     if (v.s.mode == pvoc::PlayMode::OneShot) return;   // joue jusqu'au bout
+    if (v.penvStage >= 0) {
+        // enveloppe de position : on glisse d'abord vers la position de fin,
+        // le fondu de volume commencera quand elle sera atteinte
+        if (v.penvStage < 3) {
+            v.relFrom = v.lastEnvPos;
+            v.penvStage = 3;
+            v.penvT = 0.0f;
+        }
+        return;
+    }
+    startAmpRelease(v);
+}
+
+void SamplerProcessor::startAmpRelease(Voice& v) {
     if (v.releasing) return;
     v.releasing = true;
     const float samples = (float) (juce::jmax(5.0f, v.s.releaseMs) * 0.001 * currentRate);
@@ -380,7 +405,48 @@ void SamplerProcessor::killVoice(Voice& v) {
     v.s.mode = pvoc::PlayMode::Hold;
     v.s.releaseMs = 5.0f;
     v.releasing = false;
-    releaseVoice(v);
+    startAmpRelease(v);
+}
+
+float SamplerProcessor::positionEnvelope(Voice& v, int n) {
+    auto& s = v.s;
+    float pos = pvoc::posEnvValue(s, v.penvStage, v.penvT, v.relFrom);
+    v.lastEnvPos = pos;
+
+    if (s.lfo && s.lfoDepth > 0.0f) {
+        const double ph = v.lfoPhase - std::floor(v.lfoPhase);
+        float w;
+        if (s.lfoShape == 1) w = (float) (1.0 - 4.0 * std::abs(ph - 0.5));                  // triangle
+        else if (s.lfoShape == 2) {                                                           // aleatoire doux
+            const float x = (float) (0.5 - 0.5 * std::cos(juce::MathConstants<double>::pi * ph));
+            w = v.lfoA + (v.lfoB - v.lfoA) * x;
+        } else w = (float) std::sin(2.0 * juce::MathConstants<double>::pi * ph);              // sinus
+        pos += 0.01f * s.lfoDepth * w;
+        const double next = v.lfoPhase + s.lfoRate * n / currentRate;
+        if (std::floor(next) > std::floor(v.lfoPhase)) {   // nouveau cycle : nouvelle cible aleatoire
+            v.lfoA = v.lfoB;
+            v.lfoB = lfoRandom.nextFloat() * 2.0f - 1.0f;
+        }
+        v.lfoPhase = next;
+    }
+
+    // avance dans l'enveloppe
+    v.penvT += (float) (1000.0 * n / currentRate);
+    if (v.penvStage == 0 && v.penvT >= s.aMs) { v.penvT -= s.aMs; v.penvStage = 1; }
+    if (v.penvStage == 1 && v.penvT >= s.dMs) {
+        v.penvT -= s.dMs;
+        if (s.mode == pvoc::PlayMode::OneShot) {   // one-shot : pas de maintien, on enchaine sur R
+            v.penvStage = 3;
+            v.relFrom = 0.01f * s.pSustain;
+        } else {
+            v.penvStage = 2;
+        }
+    }
+    if (v.penvStage == 3 && !v.penvDone && v.penvT >= s.rMs) {
+        v.penvDone = true;   // position de fin atteinte : fondu de volume
+        startAmpRelease(v);
+    }
+    return juce::jlimit(0.0f, 1.0f, pos);
 }
 
 void SamplerProcessor::handleMidi(const juce::MidiMessage& m) {
@@ -423,8 +489,14 @@ void SamplerProcessor::renderVoices(float* outL, float* outR, int n) {
             if (v.releasing) { v.s.mode = keepMode; v.s.releaseMs = keepRel; }
         }
         applyVoiceSettings(v);
-        v.eng->setScrubTime(smooth);
-        v.eng->setScrub(follow, pos);
+        if (!v.s.posEnv) v.penvStage = -1;   // enveloppe desactivee pendant la note
+        if (v.penvStage >= 0) {
+            v.eng->setScrubTime(0.0);           // l'enveloppe est deja continue
+            v.eng->setScrub(true, positionEnvelope(v, n));
+        } else {
+            v.eng->setScrubTime(smooth);
+            v.eng->setScrub(follow, pos);
+        }
 
         for (int p = 0; p < n;) {
             const int k = juce::jmin(n - p, (int) tmpL.size());
@@ -541,6 +613,19 @@ void SamplerProcessor::getStateInformation(juce::MemoryBlock& destData) {
             t.setProperty("start", z.settings.start, nullptr);
             t.setProperty("tune", z.settings.tuneCents, nullptr);
             t.setProperty("auto", z.settings.autoRange, nullptr);
+            const auto& s = z.settings;
+            t.setProperty("penv", s.posEnv, nullptr);
+            t.setProperty("pStart", s.pStart, nullptr);
+            t.setProperty("pPeak", s.pPeak, nullptr);
+            t.setProperty("pSustain", s.pSustain, nullptr);
+            t.setProperty("pEnd", s.pEnd, nullptr);
+            t.setProperty("aMs", s.aMs, nullptr);
+            t.setProperty("dMs", s.dMs, nullptr);
+            t.setProperty("rMs", s.rMs, nullptr);
+            t.setProperty("lfo", s.lfo, nullptr);
+            t.setProperty("lfoShape", s.lfoShape, nullptr);
+            t.setProperty("lfoRate", s.lfoRate, nullptr);
+            t.setProperty("lfoDepth", s.lfoDepth, nullptr);
             zt.appendChild(t, nullptr);
         }
     }
@@ -573,6 +658,18 @@ void SamplerProcessor::setStateInformation(const void* data, int sizeInBytes) {
         s.start = t.getProperty("start", 0.0f);
         s.tuneCents = t.getProperty("tune", 0.0f);
         s.autoRange = t.getProperty("auto", true);
+        s.posEnv = t.getProperty("penv", false);
+        s.pStart = t.getProperty("pStart", 0.0f);
+        s.pPeak = t.getProperty("pPeak", 50.0f);
+        s.pSustain = t.getProperty("pSustain", 50.0f);
+        s.pEnd = t.getProperty("pEnd", 100.0f);
+        s.aMs = t.getProperty("aMs", 500.0f);
+        s.dMs = t.getProperty("dMs", 500.0f);
+        s.rMs = t.getProperty("rMs", 1000.0f);
+        s.lfo = t.getProperty("lfo", false);
+        s.lfoShape = t.getProperty("lfoShape", 0);
+        s.lfoRate = t.getProperty("lfoRate", 0.5f);
+        s.lfoDepth = t.getProperty("lfoDepth", 3.0f);
         wanted.push_back({ juce::File(t.getProperty("file").toString()), s });
     }
     bool same = false;

@@ -61,6 +61,8 @@ indépendante.
 
 ![Sampler](docs/apercu-sampler.png)
 
+![Enveloppe de position](docs/apercu-enveloppe.png)
+
 - **Ajouter des sons** : bouton « Ajouter des sons… » (sélection multiple) ou glisser-déposer de
   fichiers ou d'un dossier entier.
 - **Zones** : chaque son a une **note de base** (la note où il sonne à sa hauteur d'origine) et une
@@ -76,6 +78,17 @@ indépendante.
   sensibilité à la vélocité, plage du pitch bend, volume, verrouillage de phase, position pilotée
   et lissage (comme dans le Lecteur PVoc, appliqués à toutes les voix).
 - **MIDI** : notes, vélocité, pédale de sustain, pitch bend, « All notes off ».
+- **Enveloppe de position** (onglet du même nom, réglable pour chaque son) : un ADSR qui pilote la
+  position de lecture, comme un scrub automatique.
+  - **A** : au début de la note, la position part du **départ** et glisse vers le **pic** en la durée d'attaque ;
+  - **D** : elle glisse ensuite vers la position de **maintien** en la durée de déclin ;
+  - **S** : elle reste à la position de maintien tant que la touche est tenue ;
+  - **R** : au relâchement, elle glisse vers la position de **fin** en la durée de relâchement ;
+    le fondu de volume (« Relâchement du volume », onglet Son) commence quand la fin est atteinte.
+  - En mode one-shot, il n'y a pas de maintien : A, D et R s'enchaînent.
+  - Un **LFO** (sinus, triangle ou aléatoire doux, vitesse et profondeur réglables) fait osciller la
+    position autour de l'enveloppe pour un son moins figé.
+  - Quand l'enveloppe est active, elle remplace la vitesse et le point de départ du son.
 - Le clavier en bas de la fenêtre joue le sampler à la souris et affiche les zones
   (la zone sélectionnée en jaune, sa note de base marquée d'un point).
 

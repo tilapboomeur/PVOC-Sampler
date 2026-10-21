@@ -111,6 +111,8 @@ void Engine::setPlayerBuffer(std::shared_ptr<const PlayerBuffer> b) {
     player = std::move(b);
     playing = false;
     stopCountdown = -1;
+    scrubbing = false;   // un nouveau son repart sans scrub en cours
+    gliding = false;
     start = PAD;
     end = PAD + (double) (player ? player->length : 0);
     loc = PAD;

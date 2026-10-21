@@ -222,6 +222,107 @@ int main(int argc, char** argv) {
         check(std::abs(freqOf(o, 9600, o.size()) - 880.0) < 0.5, "etat : le sampler restaure joue juste");
     }
 
+    // 11) enveloppe de position : son de 2 s, 300 Hz puis 900 Hz a mi-chemin
+    {
+        const auto f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("Deux_A3.wav");
+        {
+            f.deleteFile();
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(f);
+            auto w = fmt.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(48000).withNumChannels(2).withBitsPerSample(24));
+            juce::AudioBuffer<float> b(2, 96000);
+            for (int i = 0; i < 96000; ++i) {
+                const float v = 0.5f * (float) std::sin(2 * juce::MathConstants<double>::pi * (i < 48000 ? 300.0 : 900.0) * i / 48000.0);
+                b.setSample(0, i, v);
+                b.setSample(1, i, v);
+            }
+            w->writeFromAudioSampleBuffer(b, 0, 96000);
+        }
+        Rig e;
+        e.set("gain", 0.0f);
+        e.set("velocity", 0.0f);
+        const uint32_t id = e.p.addFileNow(f);
+        auto s = e.p.getZones()[0].settings;
+        s.posEnv = true;
+        s.pStart = 10; s.pPeak = 80; s.pSustain = 25; s.pEnd = 90;
+        s.aMs = 300; s.dMs = 300; s.rMs = 300; s.releaseMs = 200;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        auto hi = [](const std::vector<float>& o, double a, double b) {
+            const double g3 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 300.0), g9 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 900.0);
+            return g9 > 3 * g3 ? 1 : (g3 > 3 * g9 ? -1 : 0);   // 1 = 900 Hz (2e moitie), -1 = 300 Hz (1re moitie)
+        };
+        auto o = e.run((int) (sr * 3.0), { { 0, on(69) }, { (int) (sr * 2.0), off(69) } });
+        check(hi(o, 0.03, 0.12) == -1, "enveloppe A : depart a 10 % (1re moitie du son)");
+        check(hi(o, 0.33, 0.40) == 1, "enveloppe A : pic a 80 % atteint en 300 ms (2e moitie)");
+        check(hi(o, 0.90, 1.90) == -1, "enveloppe S : maintien a 25 % tant que la touche est tenue");
+        check(hi(o, 2.22, 2.30) == 1, "enveloppe R : glisse vers la fin (90 %) apres le relachement");
+        check(peak(o, (size_t) (1.0 * sr), (size_t) (1.9 * sr)) > 0.45, "enveloppe S : son tenu sans perte de niveau");
+        check(peak(o, (size_t) (2.62 * sr), o.size()) < 1e-3 && e.p.getActiveVoices() == 0,
+              "enveloppe R : fondu de volume apres la position de fin, puis silence");
+
+        // LFO : maintien a 45 %, +/- 10 % a 1 Hz -> la position traverse la moitie du son
+        s.aMs = 0; s.dMs = 0; s.pPeak = 45; s.pSustain = 45;
+        s.lfo = false;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 2.5), { { 0, on(69) } });
+        int n9 = 0, n3 = 0;
+        for (double t0 = 0.3; t0 < 2.4; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+        check(n9 == 0 && n3 > 15, "sans LFO : position figee (" + juce::String(n3) + " fenetres a 300 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+        s.lfo = true; s.lfoShape = 0; s.lfoRate = 1.0f; s.lfoDepth = 10.0f;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 2.5), { { 0, on(69) } });
+        n9 = 0; n3 = 0;
+        for (double t0 = 0.3; t0 < 2.4; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+        check(n9 >= 4 && n3 >= 4, "LFO sinus 1 Hz : la position oscille (" + juce::String(n9) + " fenetres a 900 Hz, "
+                                      + juce::String(n3) + " a 300 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+        for (int shape : { 1, 2 }) {
+            s.lfoShape = shape;
+            s.lfoDepth = 20.0f;
+            if (shape == 2) {   // aleatoire : centre sur 50 %, ~9 tirages, graine fixe pour un test reproductible
+                s.pPeak = 50.0f;
+                s.pSustain = 50.0f;
+                s.lfoRate = 3.0f;
+                e.p.setRandomSeed(12345);
+            }
+            e.p.updateZone(id, s);
+            e.run(1024);
+            o = e.run((int) (sr * 3.0), { { 0, on(69) } });
+            n9 = 0; n3 = 0;
+            for (double t0 = 0.3; t0 < 2.9; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+            check(n9 >= 2 && n3 >= 2, juce::String(shape == 1 ? "LFO triangle" : frs("LFO aléatoire")) + " : la position bouge ("
+                                          + juce::String(n9) + " / " + juce::String(n3) + ")");
+            e.run((int) sr, { { 0, off(69) } });
+        }
+
+        // one-shot : A, D puis R automatiquement, sans attendre le relachement
+        s.lfo = false;
+        s.mode = pvoc::PlayMode::OneShot;
+        s.pStart = 10; s.pPeak = 80; s.pSustain = 25; s.pEnd = 90;
+        s.aMs = 200; s.dMs = 200; s.rMs = 200; s.releaseMs = 100;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 1.5), { { 0, on(69) }, { 4800, off(69) } });
+        check(hi(o, 0.22, 0.28) == 1 && hi(o, 0.45, 0.52) == -1 && hi(o, 0.60, 0.62) == 1,
+              "one-shot : A puis D puis R enchaines");
+        check(peak(o, (size_t) (0.85 * sr), o.size()) < 1e-3 && e.p.getActiveVoices() == 0, "one-shot : s'arrete apres R");
+
+        // sauvegarde des reglages de l'enveloppe
+        juce::MemoryBlock st;
+        e.p.getStateInformation(st);
+        Rig q;
+        q.p.setStateInformation(st.getData(), (int) st.getSize());
+        for (int i = 0; i < 500 && (q.p.isLoading() || q.p.getZones().empty()); ++i) juce::Thread::sleep(10);
+        juce::Thread::sleep(50);
+        const auto qs = q.p.getZones()[0].settings;
+        check(qs.posEnv && qs.pPeak == 80.0f && qs.rMs == 200.0f && qs.lfoShape == 2 && qs.lfoDepth == 20.0f,
+              "etat : enveloppe de position et LFO restaures");
+    }
+
     // charge processeur : 16 voix pendant 10 s de son (information, pas un test)
     {
         r.set("voices", 16.0f);
@@ -257,9 +358,29 @@ int main(int argc, char** argv) {
         auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
         juce::File png(argv[1]);
         png.deleteFile();
-        juce::FileOutputStream os(png);
-        juce::PNGImageFormat().writeImageToStream(img, os);
+        {
+            juce::FileOutputStream os(png);
+            juce::PNGImageFormat().writeImageToStream(img, os);
+        }
         check(png.getSize() > 0, "interface : capture " + png.getFullPathName());
+        // capture de l'onglet Enveloppe de position
+        if (argc > 2) {
+            auto s = r.p.getZones()[0].settings;
+            s.posEnv = true; s.pStart = 5; s.pPeak = 70; s.pSustain = 40; s.pEnd = 95;
+            s.aMs = 400; s.dMs = 700; s.rMs = 1200;
+            s.lfo = true; s.lfoShape = 0; s.lfoRate = 0.8f; s.lfoDepth = 6.0f;
+            r.p.updateZone(r.p.getZones()[0].id, s);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+            static_cast<SamplerEditor*>(ed.get())->selectRow(0);
+            static_cast<SamplerEditor*>(ed.get())->showTab(1);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(300);
+            auto img2 = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
+            juce::File png2(argv[2]);
+            png2.deleteFile();
+            juce::FileOutputStream os2(png2);
+            juce::PNGImageFormat().writeImageToStream(img2, os2);
+            check(png2.getSize() > 0, "interface : capture de l'enveloppe " + png2.getFullPathName());
+        }
     }
 
     std::printf("\n%s (%d echec(s))\n", failures == 0 ? "TOUS LES TESTS DU SAMPLER PASSENT" : "DES TESTS ECHOUENT", failures);

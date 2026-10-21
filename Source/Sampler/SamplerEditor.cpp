@@ -3,7 +3,8 @@
 namespace {
 const juce::Colour bg(0xff141b2d), header(0xff1f2a44), card(0xff1f2a44), accent(0xfff2b84b),
     text(0xffe8ecf6), textDim(0xffb7c0d8), onAccent(0xff1f2a44), zoneCol(0xff5b6b93);
-constexpr int W = 840, Hh = 700;
+constexpr int W = 840, Hh = 840;
+constexpr int ZoneTop = 112, ZoneH = 440, GlobTop = ZoneTop + ZoneH + 12;
 const juce::String audioExt = "wav;aif;aiff;flac;ogg;mp3;m4a;caf;aac";
 
 juce::String noteLabel(int n) { return pvoc::noteName(n) + " (" + pvoc::noteNameFr(n) + ")"; }
@@ -19,6 +20,8 @@ SamplerEditor::SamplerEditor(SamplerProcessor& p)
     lnf.setColour(juce::ToggleButton::tickColourId, accent);
     lnf.setColour(juce::ListBox::backgroundColourId, card);
     lnf.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff2a3654));
+    lnf.setColour(juce::TextButton::buttonOnColourId, accent);
+    lnf.setColour(juce::TextButton::textColourOnId, onAccent);
     setLookAndFeel(&lnf);
 
     // ----- en-tete
@@ -106,6 +109,52 @@ SamplerEditor::SamplerEditor(SamplerProcessor& p)
     loop.setButtonText("Boucle");
     loop.onClick = [this] { pushZoneEdit(); };
     for (juce::Component* c : std::initializer_list<juce::Component*> { &mode, &modeL, &loop }) addAndMakeVisible(*c);
+    releaseL.setText(frs("Relâchement du volume"), juce::dontSendNotification);
+
+    // ----- onglets
+    tabSound.setButtonText("Son");
+    tabEnv.setButtonText("Enveloppe de position");
+    for (auto* t : { &tabSound, &tabEnv }) {
+        t->setClickingTogglesState(false);
+        t->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a3654));
+        addAndMakeVisible(*t);
+    }
+    tabSound.setConnectedEdges(juce::Button::ConnectedOnRight);
+    tabEnv.setConnectedEdges(juce::Button::ConnectedOnLeft);
+    tabSound.onClick = [this] { setTab(0); };
+    tabEnv.onClick = [this] { setTab(1); };
+
+    // ----- enveloppe de position
+    envOn.setButtonText(frs("Activer l'enveloppe de position (la position suit A, D, S, R)"));
+    envOn.onClick = [this] { pushZoneEdit(); };
+    addAndMakeVisible(envOn);
+    addAndMakeVisible(envGraph);
+    auto pos = [&](juce::Slider& s, juce::Label& l, const juce::String& name) {
+        setupLin(s, l, name, 0, 100, 0.1, " %", 1);
+    };
+    pos(pStartS, pStartL, frs("Départ (début de la note)"));
+    pos(pPeakS, pPeakL, frs("Pic (fin de l'attaque)"));
+    pos(pSustainS, pSustainL, "Maintien (S)");
+    pos(pEndS, pEndL, frs("Fin (après le relâchement)"));
+    auto dur = [&](juce::Slider& s, juce::Label& l, const juce::String& name) {
+        setupLin(s, l, name, 0, 10000, 1, " ms", 0);
+        s.setSkewFactorFromMidPoint(600.0);
+    };
+    dur(aS, aL, frs("A : durée de l'attaque"));
+    dur(dS, dL, frs("D : durée du déclin"));
+    dur(rS, rL, frs("R : durée vers la fin"));
+    lfoOn.setButtonText("LFO sur la position");
+    lfoOn.onClick = [this] { pushZoneEdit(); };
+    lfoShape.addItem("Sinus", 1);
+    lfoShape.addItem("Triangle", 2);
+    lfoShape.addItem(frs("Aléatoire doux"), 3);
+    lfoShape.onChange = [this] { pushZoneEdit(); };
+    addAndMakeVisible(lfoOn);
+    addAndMakeVisible(lfoShape);
+    setupLin(lfoRateS, lfoRateL, "Vitesse du LFO", 0.01, 20.0, 0.01, " Hz", 2);
+    lfoRateS.setSkewFactorFromMidPoint(1.0);
+    setupLin(lfoDepthS, lfoDepthL, "Profondeur du LFO", 0, 50, 0.1, " %", 1);
+    lfoDepthS.setSkewFactorFromMidPoint(8.0);
 
     // ----- reglages globaux
     auto& ps = proc.params;
@@ -170,15 +219,15 @@ void SamplerEditor::paint(juce::Graphics& g) {
     g.drawText(frs("Sampler polyphonique à vocodeur de phase"), 16, 34, 360, 20, juce::Justification::centredLeft);
 
     g.setColour(card);
-    g.fillRoundedRectangle(16.0f, 112.0f, 290.0f, 300.0f, 12.0f);   // liste
-    g.fillRoundedRectangle(318.0f, 112.0f, (float) getWidth() - 334.0f, 300.0f, 12.0f);   // zone
-    g.fillRoundedRectangle(16.0f, 424.0f, (float) getWidth() - 32.0f, 150.0f, 12.0f);    // globaux
+    g.fillRoundedRectangle(16.0f, (float) ZoneTop, 290.0f, (float) ZoneH, 12.0f);                          // liste
+    g.fillRoundedRectangle(318.0f, (float) ZoneTop, (float) getWidth() - 334.0f, (float) ZoneH, 12.0f);    // zone
+    g.fillRoundedRectangle(16.0f, (float) GlobTop, (float) getWidth() - 32.0f, 150.0f, 12.0f);             // globaux
 
     if (selectedId == 0) {
         g.setColour(textDim);
         g.setFont(juce::FontOptions(15.0f));
         g.drawText(frs("Sélectionnez un son dans la liste pour régler sa zone."),
-                   juce::Rectangle<int>(318, 112, getWidth() - 334, 300), juce::Justification::centred);
+                   juce::Rectangle<int>(318, ZoneTop, getWidth() - 334, ZoneH), juce::Justification::centred);
     }
 }
 
@@ -220,40 +269,64 @@ void SamplerEditor::resized() {
     statusLabel.setBounds(16, 76, w - 32, 26);
     clearButton.setBounds(16, 76, 110, 26);
 
-    list.setBounds(24, 120, 274, 284);
-    emptyHint.setBounds(24, 120, 274, 284);
+    list.setBounds(24, ZoneTop + 8, 274, ZoneH - 16);
+    emptyHint.setBounds(24, ZoneTop + 8, 274, ZoneH - 16);
 
-    // zone selectionnee : deux colonnes
+    // zone selectionnee : titre, onglets, puis deux colonnes
     const int x0 = 334, colW = (w - 334 - 32) / 2;
-    zoneTitle.setBounds(x0, 118, w - x0 - 170, 26);
-    zoneInfo.setBounds(x0, 142, w - x0 - 170, 20);
-    removeButton.setBounds(w - 160, 122, 130, 28);
-    int y = 166;
-    auto noteRow = [&](juce::Label& l, juce::Slider& s, int x) {
+    zoneTitle.setBounds(x0, ZoneTop + 6, w - x0 - 170, 26);
+    zoneInfo.setBounds(x0, ZoneTop + 30, w - x0 - 170, 20);
+    removeButton.setBounds(w - 160, ZoneTop + 10, 130, 28);
+    tabSound.setBounds(x0, ZoneTop + 58, 120, 28);
+    tabEnv.setBounds(x0 + 120, ZoneTop + 58, 200, 28);
+
+    int y = ZoneTop + 98;
+    auto row = [&](juce::Label& l, juce::Slider& s, int x) {
         l.setBounds(x, y, colW - 8, 20);
         s.setBounds(x, y + 20, colW - 16, 26);
     };
-    noteRow(rootL, root, x0);
-    noteRow(tuneL, tune, x0 + colW);
-    y += 50;
-    noteRow(lowL, low, x0);
-    noteRow(highL, high, x0 + colW);
-    y += 50;
+    // onglet Son
+    row(rootL, root, x0);
+    row(tuneL, tune, x0 + colW);
+    y += 52;
+    row(lowL, low, x0);
+    row(highL, high, x0 + colW);
+    y += 52;
     modeL.setBounds(x0, y, 60, 26);
     mode.setBounds(x0 + 40, y, colW - 56, 26);
     loop.setBounds(x0 + colW, y, 100, 26);
-    y += 32;
-    noteRow(releaseL, release, x0);
-    noteRow(zgainL, zgain, x0 + colW);
+    y += 36;
+    row(releaseL, release, x0);
+    row(zgainL, zgain, x0 + colW);
+    y += 52;
+    row(zspeedL, zspeed, x0);
+    row(zstartL, zstart, x0 + colW);
+
+    // onglet Enveloppe de position
+    y = ZoneTop + 94;
+    envOn.setBounds(x0 - 4, y, w - x0 - 20, 24);
+    y += 28;
+    envGraph.setBounds(x0, y, w - x0 - 32, 70);
+    y += 76;
+    row(pStartL, pStartS, x0);
+    row(aL, aS, x0 + colW);
+    y += 46;
+    row(pPeakL, pPeakS, x0);
+    row(dL, dS, x0 + colW);
+    y += 46;
+    row(pSustainL, pSustainS, x0);
+    row(rL, rS, x0 + colW);
+    y += 46;
+    row(pEndL, pEndS, x0);
+    lfoOn.setBounds(x0 + colW - 4, y + 2, colW - 8, 22);
+    lfoShape.setBounds(x0 + colW, y + 24, colW - 16, 24);
     y += 50;
-    zspeedL.setBounds(x0, y, colW - 8, 20);
-    zspeed.setBounds(x0, y + 20, colW - 16, 26);
-    zstartL.setBounds(x0 + colW, y, colW - 8, 20);
-    zstart.setBounds(x0 + colW, y + 20, colW - 16, 26);
+    row(lfoRateL, lfoRateS, x0);
+    row(lfoDepthL, lfoDepthS, x0 + colW);
 
     // reglages globaux : 3 colonnes
     const int gx = 30, gw = (w - 60) / 3;
-    int gy = 432;
+    int gy = GlobTop + 8;
     auto grow = [&](juce::Label& l, juce::Slider& s, int col) {
         l.setBounds(gx + col * gw, gy, gw - 12, 20);
         s.setBounds(gx + col * gw, gy + 20, gw - 16, 24);
@@ -293,7 +366,8 @@ void SamplerEditor::paintListBoxItem(int row, juce::Graphics& g, int w, int h, b
     const auto& s = z.settings;
     g.drawText(pvoc::noteName(s.root) + frs("  ·  ") + pvoc::noteName(s.low) + frs(" → ") + pvoc::noteName(s.high)
                    + (s.mode == pvoc::PlayMode::OneShot ? frs("  ·  one-shot") : juce::String())
-                   + (s.loop ? frs("  ·  boucle") : juce::String()),
+                   + (s.loop ? frs("  ·  boucle") : juce::String())
+                   + (s.posEnv ? frs("  ·  enveloppe") : juce::String()),
                12, 22, w - 18, 18, juce::Justification::centredLeft, true);
 }
 
@@ -331,10 +405,18 @@ void SamplerEditor::reloadZones() {
 void SamplerEditor::showSelectedZone() {
     const auto* z = selectedZone();
     const bool has = z != nullptr;
-    for (juce::Component* c : std::initializer_list<juce::Component*> {
-             &zoneTitle, &zoneInfo, &removeButton, &root, &low, &high, &tune, &release, &zgain, &zspeed, &zstart,
-             &rootL, &lowL, &highL, &tuneL, &releaseL, &zgainL, &zspeedL, &zstartL, &mode, &modeL, &loop })
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &zoneTitle, &zoneInfo, &removeButton, &tabSound, &tabEnv })
         c->setVisible(has);
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &root, &low, &high, &tune, &release, &zgain, &zspeed, &zstart,
+             &rootL, &lowL, &highL, &tuneL, &releaseL, &zgainL, &zspeedL, &zstartL, &mode, &modeL, &loop })
+        c->setVisible(has && tab == 0);
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &envOn, &envGraph, &pStartS, &pPeakS, &pSustainS, &pEndS, &aS, &dS, &rS, &lfoRateS, &lfoDepthS,
+             &pStartL, &pPeakL, &pSustainL, &pEndL, &aL, &dL, &rL, &lfoRateL, &lfoDepthL, &lfoOn, &lfoShape })
+        c->setVisible(has && tab == 1);
+    tabSound.setToggleState(tab == 0, juce::dontSendNotification);
+    tabEnv.setToggleState(tab == 1, juce::dontSendNotification);
     if (!has) return;
     updatingUi = true;
     const auto& s = z->settings;
@@ -350,8 +432,32 @@ void SamplerEditor::showSelectedZone() {
     zstart.setValue(s.start, juce::dontSendNotification);
     mode.setSelectedId(s.mode == pvoc::PlayMode::OneShot ? 2 : 1, juce::dontSendNotification);
     loop.setToggleState(s.loop, juce::dontSendNotification);
-    release.setEnabled(s.mode == pvoc::PlayMode::Hold);
-    releaseL.setEnabled(s.mode == pvoc::PlayMode::Hold);
+    release.setEnabled(s.mode == pvoc::PlayMode::Hold || s.posEnv);
+    releaseL.setEnabled(s.mode == pvoc::PlayMode::Hold || s.posEnv);
+    // avec l'enveloppe, c'est elle qui mene la position : vitesse et depart du son sont ignores
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &zspeed, &zspeedL, &zstart, &zstartL })
+        c->setEnabled(!s.posEnv);
+    envOn.setToggleState(s.posEnv, juce::dontSendNotification);
+    pStartS.setValue(s.pStart, juce::dontSendNotification);
+    pPeakS.setValue(s.pPeak, juce::dontSendNotification);
+    pSustainS.setValue(s.pSustain, juce::dontSendNotification);
+    pEndS.setValue(s.pEnd, juce::dontSendNotification);
+    aS.setValue(s.aMs, juce::dontSendNotification);
+    dS.setValue(s.dMs, juce::dontSendNotification);
+    rS.setValue(s.rMs, juce::dontSendNotification);
+    lfoOn.setToggleState(s.lfo, juce::dontSendNotification);
+    lfoShape.setSelectedId(s.lfoShape + 1, juce::dontSendNotification);
+    lfoRateS.setValue(s.lfoRate, juce::dontSendNotification);
+    lfoDepthS.setValue(s.lfoDepth, juce::dontSendNotification);
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &pStartS, &pPeakS, &pSustainS, &pEndS, &aS, &dS, &rS, &pStartL, &pPeakL, &pSustainL, &pEndL, &aL, &dL, &rL, &lfoOn })
+        c->setEnabled(s.posEnv);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &lfoShape, &lfoRateS, &lfoDepthS, &lfoRateL, &lfoDepthL })
+        c->setEnabled(s.posEnv && s.lfo);
+    // one-shot : pas de maintien
+    pSustainL.setText(s.mode == pvoc::PlayMode::OneShot ? frs("Maintien (one-shot : point de passage)") : frs("Maintien (S)"),
+                      juce::dontSendNotification);
+    envGraph.setSettings(s);
     updatingUi = false;
 }
 
@@ -374,6 +480,19 @@ void SamplerEditor::pushZoneEdit() {
     s.start = (float) zstart.getValue();
     s.mode = mode.getSelectedId() == 2 ? pvoc::PlayMode::OneShot : pvoc::PlayMode::Hold;
     s.loop = loop.getToggleState();
+    s.posEnv = envOn.getToggleState();
+    s.pStart = (float) pStartS.getValue();
+    s.pPeak = (float) pPeakS.getValue();
+    s.pSustain = (float) pSustainS.getValue();
+    s.pEnd = (float) pEndS.getValue();
+    s.aMs = (float) aS.getValue();
+    s.dMs = (float) dS.getValue();
+    s.rMs = (float) rS.getValue();
+    s.lfo = lfoOn.getToggleState();
+    s.lfoShape = juce::jmax(0, lfoShape.getSelectedId() - 1);
+    s.lfoRate = (float) lfoRateS.getValue();
+    s.lfoDepth = (float) lfoDepthS.getValue();
+    envGraph.setSettings(s);
     proc.updateZone(z->id, s);
 }
 
@@ -429,4 +548,84 @@ void SamplerEditor::timerCallback() {
     positionS.setEnabled(followT.getToggleState());
     positionL.setEnabled(followT.getToggleState());
     clearButton.setVisible(!zones.empty());
+}
+
+void SamplerEditor::setTab(int t) {
+    tab = t;
+    showSelectedZone();
+    repaint();
+}
+
+// ------------------------------------------------------------------ graphique de l'enveloppe
+
+void PosEnvGraph::paint(juce::Graphics& g) {
+    const auto r = getLocalBounds().toFloat();
+    g.setColour(juce::Colour(0xff141b2d));
+    g.fillRoundedRectangle(r, 6.0f);
+    const auto plot = r.reduced(8.0f, 7.0f).withTrimmedBottom(12.0f).withTrimmedLeft(32.0f);
+    const float alpha = s.posEnv ? 1.0f : 0.35f;
+
+    // grille : 0, 50 et 100 % du son
+    g.setColour(juce::Colour(0xff35415f).withAlpha(alpha));
+    for (float p : { 0.0f, 0.5f, 1.0f }) {
+        const float yy = plot.getBottom() - p * plot.getHeight();
+        g.drawHorizontalLine((int) yy, plot.getX(), plot.getRight());
+    }
+
+    // largeurs : durees reelles pour A, D, R ; maintien de largeur fixe
+    const bool oneShot = s.mode == pvoc::PlayMode::OneShot;
+    const float a = juce::jmax(0.0f, s.aMs), d = juce::jmax(0.0f, s.dMs), rr = juce::jmax(0.0f, s.rMs);
+    const float total = juce::jmax(1.0f, a + d + rr);
+    const float sustainW = oneShot ? 0.0f : plot.getWidth() * 0.22f;
+    const float scale = (plot.getWidth() - sustainW) / total;
+    const float xA = plot.getX() + a * scale, xD = xA + d * scale, xS = xD + sustainW, xR = xS + rr * scale;
+    auto yOf = [&](float pct) { return plot.getBottom() - 0.01f * pct * plot.getHeight(); };
+
+    juce::Path p;
+    p.startNewSubPath(plot.getX(), yOf(s.pStart));
+    p.lineTo(xA, yOf(s.pPeak));
+    p.lineTo(xD, yOf(s.pSustain));
+    p.lineTo(xS, yOf(s.pSustain));
+    p.lineTo(xR, yOf(s.pEnd));
+
+    // LFO : bande autour de la courbe
+    if (s.lfo && s.lfoDepth > 0.0f) {
+        const float dy = 0.01f * s.lfoDepth * plot.getHeight();
+        g.setColour(juce::Colour(0xfff2b84b).withAlpha(0.18f * alpha));
+        juce::Path band;
+        band.startNewSubPath(plot.getX(), yOf(s.pStart) - dy);
+        band.lineTo(xA, yOf(s.pPeak) - dy);
+        band.lineTo(xD, yOf(s.pSustain) - dy);
+        band.lineTo(xS, yOf(s.pSustain) - dy);
+        band.lineTo(xR, yOf(s.pEnd) - dy);
+        band.lineTo(xR, yOf(s.pEnd) + dy);
+        band.lineTo(xS, yOf(s.pSustain) + dy);
+        band.lineTo(xD, yOf(s.pSustain) + dy);
+        band.lineTo(xA, yOf(s.pPeak) + dy);
+        band.lineTo(plot.getX(), yOf(s.pStart) + dy);
+        band.closeSubPath();
+        g.fillPath(band);
+    }
+    g.setColour(juce::Colour(0xfff2b84b).withAlpha(alpha));
+    g.strokePath(p, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    for (auto pt : { juce::Point<float>(plot.getX(), yOf(s.pStart)), juce::Point<float>(xA, yOf(s.pPeak)),
+                     juce::Point<float>(xD, yOf(s.pSustain)), juce::Point<float>(xS, yOf(s.pSustain)),
+                     juce::Point<float>(xR, yOf(s.pEnd)) })
+        g.fillEllipse(pt.x - 3.0f, pt.y - 3.0f, 6.0f, 6.0f);
+
+    // lettres des etapes
+    g.setColour(juce::Colour(0xffb7c0d8).withAlpha(alpha));
+    g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    auto label = [&](const char* t, float x1, float x2) {
+        if (x2 - x1 > 8.0f) g.drawText(t, juce::Rectangle<float>(x1, plot.getBottom() + 1.0f, x2 - x1, 12.0f), juce::Justification::centred);
+    };
+    label("A", plot.getX(), xA);
+    label("D", xA, xD);
+    if (!oneShot) label("S", xD, xS);
+    label("R", xS, xR);
+    // reperes de position a gauche (la courbe commence apres)
+    g.setFont(juce::FontOptions(10.0f));
+    g.setColour(juce::Colour(0xffb7c0d8).withAlpha(0.7f * alpha));
+    g.drawText("100 %", juce::Rectangle<float>(r.getX() + 2.0f, plot.getY() - 6.0f, 34.0f, 12.0f), juce::Justification::centredLeft);
+    g.drawText("0 %", juce::Rectangle<float>(r.getX() + 2.0f, plot.getBottom() - 6.0f, 34.0f, 12.0f), juce::Justification::centredLeft);
 }

@@ -3,6 +3,15 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "SamplerProcessor.h"
 
+/** Dessin de l'enveloppe de position (position en fonction du temps). */
+class PosEnvGraph : public juce::Component {
+public:
+    void setSettings(const pvoc::ZoneSettings& st) { s = st; repaint(); }
+    void paint(juce::Graphics&) override;
+private:
+    pvoc::ZoneSettings s;
+};
+
 class SamplerEditor : public juce::AudioProcessorEditor,
                       public juce::FileDragAndDropTarget,
                       private juce::ListBoxModel,
@@ -23,6 +32,7 @@ public:
 
     /** Pour les tests : selectionne une zone par son rang. */
     void selectRow(int row) { list.selectRow(row); }
+    void showTab(int t) { setTab(t); }
 
 private:
     // ListBoxModel
@@ -56,6 +66,18 @@ private:
     juce::Label rootL, lowL, highL, tuneL, releaseL, zgainL, zspeedL, zstartL, modeL;
     juce::ComboBox mode;
     juce::ToggleButton loop;
+
+    // onglets du panneau de la zone
+    juce::TextButton tabSound, tabEnv;
+    int tab = 0;
+    void setTab(int t);
+
+    // enveloppe de position et LFO
+    juce::ToggleButton envOn, lfoOn;
+    PosEnvGraph envGraph;
+    juce::Slider pStartS, pPeakS, pSustainS, pEndS, aS, dS, rS, lfoRateS, lfoDepthS;
+    juce::Label pStartL, pPeakL, pSustainL, pEndL, aL, dL, rL, lfoRateL, lfoDepthL;
+    juce::ComboBox lfoShape;
 
     // reglages globaux (parametres automatisables)
     juce::Slider voicesS, speedS, transposeS, velocityS, bendS, gainS, positionS, smoothS;
