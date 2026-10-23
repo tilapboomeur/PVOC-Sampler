@@ -92,6 +92,23 @@ indépendante.
 - Le clavier en bas de la fenêtre joue le sampler à la souris et affiche les zones
   (la zone sélectionnée en jaune, sa note de base marquée d'un point).
 
+- **Enveloppe de position pilotable** (onglet « Enveloppe de position (automation / MIDI) » en bas) :
+  neuf paramètres automatisables et assignables à un contrôleur MIDI, appliqués à tous les sons dont
+  l'enveloppe est active, par-dessus leurs propres réglages :
+  - décalage du départ, du pic, du maintien et de la fin (−100 à +100 % de la longueur du son) ;
+    le maintien se déplace en direct pendant une note tenue, avec un lissage d'environ 30 ms ;
+  - échelle des durées A, D et R (10 à 1000 %, 100 % = durées réglées pour chaque son) ;
+  - échelle de la vitesse et de la profondeur du LFO.
+  Un double-clic sur un curseur le remet au neutre (0 % ou 100 %).
+- **Banques de sons** (en haut de la fenêtre) : « Enregistrer… » sauve les sons et tous les réglages
+  dans `Documents/Sampler PVoc/Banques`. Par défaut, les sons sont copiés dans un dossier
+  « <nom de la banque> (sons) » à côté du fichier `.pvocbank` : la banque peut alors être déplacée ou
+  copiée sur un autre Mac. La liste déroulante et les flèches ◀ ▶ passent d'une banque à l'autre ;
+  « Ouvrir une banque… » ouvre une banque rangée ailleurs.
+- **Organiser** : trier la liste par note de base, par nom de fichier, inverser l'ordre, ou activer le
+  tri automatique par note (activé par défaut : chaque son ajouté prend sa place). Plusieurs sons
+  ajoutés d'un coup arrivent dans l'ordre de la sélection.
+
 Dans Logic Pro, il se trouve dans les instruments (*AU Instruments > Lecteur PVoc > Sampler PVoc*) ;
 dans Ableton Live, dans *Plug-ins* comme instrument.
 

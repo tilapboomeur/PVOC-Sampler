@@ -3,8 +3,8 @@
 namespace {
 const juce::Colour bg(0xff141b2d), header(0xff1f2a44), card(0xff1f2a44), accent(0xfff2b84b),
     text(0xffe8ecf6), textDim(0xffb7c0d8), onAccent(0xff1f2a44), zoneCol(0xff5b6b93);
-constexpr int W = 840, Hh = 840;
-constexpr int ZoneTop = 112, ZoneH = 440, GlobTop = ZoneTop + ZoneH + 12;
+constexpr int W = 840, Hh = 876;
+constexpr int ZoneTop = 116, ZoneH = 440, GlobTop = ZoneTop + ZoneH + 12, GlobH = 190;
 const juce::String audioExt = "wav;aif;aiff;flac;ogg;mp3;m4a;caf;aac";
 
 juce::String noteLabel(int n) { return pvoc::noteName(n) + " (" + pvoc::noteNameFr(n) + ")"; }
@@ -32,9 +32,25 @@ SamplerEditor::SamplerEditor(SamplerProcessor& p)
     spreadButton.setButtonText(frs("Répartir sur le clavier"));
     spreadButton.setTooltip(frs("Recalcule les plages de toutes les zones à partir de leurs notes de base."));
     spreadButton.onClick = [this] { proc.autoSpread(); };
-    clearButton.setButtonText("Tout retirer");
-    clearButton.onClick = [this] { proc.removeAllZones(); };
-    for (auto* b : { &addButton, &spreadButton, &clearButton }) addAndMakeVisible(*b);
+    organiseButton.setButtonText(frs("Organiser ▾"));
+    organiseButton.setTooltip(frs("Trier la liste des sons, ou tout retirer."));
+    organiseButton.onClick = [this] { showOrganiseMenu(); };
+    for (auto* b : { &addButton, &spreadButton, &organiseButton }) addAndMakeVisible(*b);
+
+    // ----- banques de sons
+    bankPrev.setButtonText(frs("◀"));
+    bankNext.setButtonText(frs("▶"));
+    bankPrev.setTooltip(frs("Banque précédente"));
+    bankNext.setTooltip(frs("Banque suivante"));
+    bankPrev.onClick = [this] { stepBank(-1); };
+    bankNext.onClick = [this] { stepBank(1); };
+    bankSave.setButtonText(frs("Enregistrer…"));
+    bankSave.setTooltip(frs("Enregistre les sons et tous les réglages dans une banque."));
+    bankSave.onClick = [this] { askSaveBank(); };
+    bankBox.setTextWhenNothingSelected(frs("— Banque de sons —"));
+    bankBox.onChange = [this] { bankChosen(); };
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &bankPrev, &bankNext, &bankSave, &bankBox })
+        addAndMakeVisible(*c);
     statusLabel.setColour(juce::Label::textColourId, textDim);
     statusLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(statusLabel);
@@ -186,6 +202,42 @@ SamplerEditor::SamplerEditor(SamplerProcessor& p)
     buttonAtt.push_back(std::make_unique<BA>(ps, "follow", followT));
     buttonAtt.push_back(std::make_unique<BA>(ps, "lock", lockT));
 
+    // ----- enveloppe de position pilotable : s'ajoute aux reglages de chaque son
+    const char* ofsId[] = { "envStart", "envPeak", "envSustain", "envEnd" };
+    const char* ofsName[] = { "Décalage du départ", "Décalage du pic", "Décalage du maintien", "Décalage de la fin" };
+    for (int i = 0; i < 4; ++i) {
+        setupGlobal(envOfsS[i], envOfsL[i], ofsId[i], frs(ofsName[i]), " %", 1);
+        envOfsS[i].setDoubleClickReturnValue(true, 0.0);
+    }
+    const char* timeId[] = { "envA", "envD", "envR" };
+    const char* timeName[] = { "Durée A (échelle)", "Durée D (échelle)", "Durée R (échelle)" };
+    for (int i = 0; i < 3; ++i) {
+        setupGlobal(envTimeS[i], envTimeL[i], timeId[i], frs(timeName[i]), " %", 0);
+        envTimeS[i].setDoubleClickReturnValue(true, 100.0);
+    }
+    setupGlobal(lfoRateG, lfoRateGL, "lfoRate", frs("Vitesse du LFO (échelle)"), " %", 0);
+    setupGlobal(lfoDepthG, lfoDepthGL, "lfoDepth", frs("Profondeur du LFO (échelle)"), " %", 0);
+    lfoRateG.setDoubleClickReturnValue(true, 100.0);
+    lfoDepthG.setDoubleClickReturnValue(true, 100.0);
+
+    gTabMain.setButtonText(frs("Réglages généraux"));
+    gTabEnv.setButtonText(frs("Enveloppe de position (automation / MIDI)"));
+    for (auto* t : { &gTabMain, &gTabEnv }) {
+        t->setClickingTogglesState(false);
+        t->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a3654));
+        addAndMakeVisible(*t);
+    }
+    gTabMain.setConnectedEdges(juce::Button::ConnectedOnRight);
+    gTabEnv.setConnectedEdges(juce::Button::ConnectedOnLeft);
+    gTabMain.onClick = [this] { setGlobalTab(0); };
+    gTabEnv.onClick = [this] { setGlobalTab(1); };
+    gEnvHint.setText(frs("S'ajoute à chaque son · double-clic : neutre"), juce::dontSendNotification);
+    gEnvHint.setFont(juce::FontOptions(13.0f));
+    gEnvHint.setMinimumHorizontalScale(1.0f);
+    gEnvHint.setColour(juce::Label::textColourId, textDim);
+    gEnvHint.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(gEnvHint);
+
     // ----- clavier
     keyboard.setAvailableRange(0, 127);
     keyboard.setLowestVisibleKey(24);
@@ -195,6 +247,8 @@ SamplerEditor::SamplerEditor(SamplerProcessor& p)
     addAndMakeVisible(keyboard);
 
     proc.addChangeListener(this);
+    refreshBankList();
+    setGlobalTab(0);
     setSize(W, Hh);
     reloadZones();
     startTimerHz(15);
@@ -221,7 +275,7 @@ void SamplerEditor::paint(juce::Graphics& g) {
     g.setColour(card);
     g.fillRoundedRectangle(16.0f, (float) ZoneTop, 290.0f, (float) ZoneH, 12.0f);                          // liste
     g.fillRoundedRectangle(318.0f, (float) ZoneTop, (float) getWidth() - 334.0f, (float) ZoneH, 12.0f);    // zone
-    g.fillRoundedRectangle(16.0f, (float) GlobTop, (float) getWidth() - 32.0f, 150.0f, 12.0f);             // globaux
+    g.fillRoundedRectangle(16.0f, (float) GlobTop, (float) getWidth() - 32.0f, (float) GlobH, 12.0f);      // globaux
 
     if (selectedId == 0) {
         g.setColour(textDim);
@@ -264,10 +318,16 @@ void SamplerEditor::paintOverChildren(juce::Graphics& g) {
 
 void SamplerEditor::resized() {
     const int w = getWidth();
-    addButton.setBounds(w - 236, 13, 220, 40);
-    spreadButton.setBounds(w - 446, 19, 200, 28);
-    statusLabel.setBounds(16, 76, w - 32, 26);
-    clearButton.setBounds(16, 76, 110, 26);
+    // en-tete : banques de sons
+    bankPrev.setBounds(w - 494, 18, 32, 30);
+    bankBox.setBounds(w - 458, 18, 264, 30);
+    bankNext.setBounds(w - 190, 18, 32, 30);
+    bankSave.setBounds(w - 150, 18, 134, 30);
+    // rangee des sons
+    addButton.setBounds(16, 74, 210, 34);
+    organiseButton.setBounds(234, 77, 126, 28);
+    spreadButton.setBounds(368, 77, 200, 28);
+    statusLabel.setBounds(576, 77, w - 592, 28);
 
     list.setBounds(24, ZoneTop + 8, 274, ZoneH - 16);
     emptyHint.setBounds(24, ZoneTop + 8, 274, ZoneH - 16);
@@ -324,9 +384,31 @@ void SamplerEditor::resized() {
     row(lfoRateL, lfoRateS, x0);
     row(lfoDepthL, lfoDepthS, x0 + colW);
 
-    // reglages globaux : 3 colonnes
+    // reglages globaux : onglets puis 3 colonnes
+    gTabMain.setBounds(30, GlobTop + 8, 170, 26);
+    gTabEnv.setBounds(200, GlobTop + 8, 320, 26);
+    gEnvHint.setBounds(530, GlobTop + 8, w - 560, 26);
     const int gx = 30, gw = (w - 60) / 3;
-    int gy = GlobTop + 8;
+    int gy = GlobTop + 42;
+    {
+        // onglet enveloppe : memes emplacements
+        int ey = gy;
+        auto erow = [&](juce::Label& l, juce::Slider& s, int col) {
+            l.setBounds(gx + col * gw, ey, gw - 12, 20);
+            s.setBounds(gx + col * gw, ey + 20, gw - 16, 24);
+        };
+        erow(envOfsL[0], envOfsS[0], 0);
+        erow(envOfsL[1], envOfsS[1], 1);
+        erow(envOfsL[2], envOfsS[2], 2);
+        ey += 48;
+        erow(envOfsL[3], envOfsS[3], 0);
+        erow(envTimeL[0], envTimeS[0], 1);
+        erow(envTimeL[1], envTimeS[1], 2);
+        ey += 48;
+        erow(envTimeL[2], envTimeS[2], 0);
+        erow(lfoRateGL, lfoRateG, 1);
+        erow(lfoDepthGL, lfoDepthG, 2);
+    }
     auto grow = [&](juce::Label& l, juce::Slider& s, int col) {
         l.setBounds(gx + col * gw, gy, gw - 12, 20);
         s.setBounds(gx + col * gw, gy + 20, gw - 16, 24);
@@ -534,12 +616,18 @@ void SamplerEditor::filesDropped(const juce::StringArray& files, int, int) {
 
 // ------------------------------------------------------------------ mises a jour
 
-void SamplerEditor::changeListenerCallback(juce::ChangeBroadcaster*) { reloadZones(); }
+void SamplerEditor::changeListenerCallback(juce::ChangeBroadcaster*) {
+    reloadZones();
+    if (!proc.isLoading()) refreshBankList();
+}
 
 void SamplerEditor::timerCallback() {
     juce::String st;
     if (proc.isLoading()) st = frs("Chargement…");
     else if (proc.getLastError().isNotEmpty()) st = proc.getLastError();
+    else if (proc.getInfoMessage().isNotEmpty() && (proc.getInfoMessage() != lastInfo ? (lastInfo = proc.getInfoMessage(), infoTicks = 0, true)
+                                                                                    : ++infoTicks < 45))
+        st = proc.getInfoMessage();   // message affiche ~3 s
     else
         st = juce::String(zones.size()) + (zones.size() > 1 ? " sons" : " son") + frs("  ·  voix actives : ")
              + juce::String(proc.getActiveVoices()) + " / "
@@ -547,7 +635,120 @@ void SamplerEditor::timerCallback() {
     statusLabel.setText(st, juce::dontSendNotification);
     positionS.setEnabled(followT.getToggleState());
     positionL.setEnabled(followT.getToggleState());
-    clearButton.setVisible(!zones.empty());
+}
+
+// ------------------------------------------------------------------ banques de sons
+
+void SamplerEditor::refreshBankList() {
+    bankFiles = SamplerProcessor::listBanks();
+    const auto current = proc.getCurrentBank();
+    bankBox.clear(juce::dontSendNotification);
+    int sel = 0;
+    for (int i = 0; i < bankFiles.size(); ++i) {
+        bankBox.addItem(bankFiles[i].getFileNameWithoutExtension(), i + 1);
+        if (bankFiles[i] == current) sel = i + 1;
+    }
+    bankBox.addSeparator();
+    bankBox.addItem(frs("Ouvrir une banque…"), 1000);
+    bankBox.addItem(frs("Afficher le dossier des banques"), 1001);
+    if (sel > 0) bankBox.setSelectedId(sel, juce::dontSendNotification);
+    else if (current != juce::File()) bankBox.setText(current.getFileNameWithoutExtension(), juce::dontSendNotification);
+    else bankBox.setSelectedId(0, juce::dontSendNotification);
+}
+
+void SamplerEditor::bankChosen() {
+    const int id = bankBox.getSelectedId();
+    if (id == 1000) {
+        refreshBankList();
+        chooser = std::make_unique<juce::FileChooser>(frs("Ouvrir une banque"), SamplerProcessor::getBanksFolder(), "*.pvocbank");
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                             [this](const juce::FileChooser& fc) {
+                                 const auto f = fc.getResult();
+                                 if (f.existsAsFile()) proc.loadBank(f);
+                             });
+    } else if (id == 1001) {
+        refreshBankList();
+        SamplerProcessor::getBanksFolder().startAsProcess();
+    } else if (id >= 1 && id <= bankFiles.size()) {
+        proc.loadBank(bankFiles[id - 1]);
+    }
+}
+
+void SamplerEditor::stepBank(int delta) {
+    bankFiles = SamplerProcessor::listBanks();
+    if (bankFiles.isEmpty()) return;
+    int idx = bankFiles.indexOf(proc.getCurrentBank());
+    idx = idx < 0 ? (delta > 0 ? 0 : bankFiles.size() - 1) : (idx + delta + bankFiles.size()) % bankFiles.size();
+    proc.loadBank(bankFiles[idx]);
+    refreshBankList();
+}
+
+void SamplerEditor::askSaveBank() {
+    auto* aw = new juce::AlertWindow(frs("Enregistrer la banque"),
+                                     frs("Les sons et tous les réglages sont enregistrés dans le dossier des banques."),
+                                     juce::MessageBoxIconType::NoIcon, this);
+    const auto current = proc.getCurrentBank();
+    aw->addTextEditor("name", current != juce::File() ? current.getFileNameWithoutExtension() : frs("Nouvelle banque"), "Nom");
+    aw->addComboBox("copy", { frs("Copier les sons dans la banque (recommandé)"), frs("Garder les sons à leur emplacement") }, "Sons");
+    aw->addButton("Enregistrer", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    aw->addButton("Annuler", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<SamplerEditor> safe(this);
+    aw->enterModalState(true, juce::ModalCallbackFunction::create([safe, aw](int result) {
+        if (safe == nullptr || result != 1) return;
+        const auto name = juce::File::createLegalFileName(aw->getTextEditorContents("name").trim());
+        if (name.isEmpty()) return;
+        const bool copy = aw->getComboBoxComponent("copy")->getSelectedItemIndex() == 0;
+        const auto file = SamplerProcessor::getBanksFolder().getChildFile(name + ".pvocbank");
+        auto save = [safe, file, copy] {
+            if (safe == nullptr) return;
+            safe->proc.saveBank(file, copy);
+        };
+        if (file.existsAsFile() && file != safe->proc.getCurrentBank()) {
+            juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, frs("Remplacer la banque ?"),
+                                               frs("Une banque « ") + name + frs(" » existe déjà. La remplacer ?"),
+                                               "Remplacer", "Annuler", safe.getComponent(),
+                                               juce::ModalCallbackFunction::create([save](int r) { if (r == 1) save(); }));
+        } else {
+            save();
+        }
+    }), true);
+}
+
+// ------------------------------------------------------------------ menu Organiser
+
+void SamplerEditor::showOrganiseMenu() {
+    juce::PopupMenu m;
+    m.addItem(1, frs("Trier par note de base"), !zones.empty());
+    m.addItem(2, frs("Trier par nom de fichier"), !zones.empty());
+    m.addItem(3, frs("Inverser l'ordre"), !zones.empty());
+    m.addSeparator();
+    m.addItem(4, frs("Tri automatique par note (à chaque ajout)"), true, proc.getAutoSort());
+    m.addSeparator();
+    m.addItem(5, frs("Tout retirer"), !zones.empty());
+    juce::Component::SafePointer<SamplerEditor> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&organiseButton), [safe](int r) {
+        if (safe == nullptr) return;
+        auto& p = safe->proc;
+        if (r == 1) p.sortZones(SamplerProcessor::SortMode::ByNote);
+        else if (r == 2) p.sortZones(SamplerProcessor::SortMode::ByName);
+        else if (r == 3) p.sortZones(SamplerProcessor::SortMode::Reverse);
+        else if (r == 4) p.setAutoSort(!p.getAutoSort());
+        else if (r == 5) p.removeAllZones();
+    });
+}
+
+void SamplerEditor::setGlobalTab(int t) {
+    gtab = t;
+    for (juce::Component* c : std::initializer_list<juce::Component*> {
+             &voicesS, &speedS, &transposeS, &velocityS, &bendS, &gainS, &positionS, &smoothS,
+             &voicesL, &speedL, &transposeL, &velocityL, &bendL, &gainL, &positionL, &smoothL, &followT, &lockT })
+        c->setVisible(t == 0);
+    for (int i = 0; i < 4; ++i) { envOfsS[i].setVisible(t == 1); envOfsL[i].setVisible(t == 1); }
+    for (int i = 0; i < 3; ++i) { envTimeS[i].setVisible(t == 1); envTimeL[i].setVisible(t == 1); }
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &lfoRateG, &lfoDepthG, &lfoRateGL, &lfoDepthGL, &gEnvHint })
+        c->setVisible(t == 1);
+    gTabMain.setToggleState(t == 0, juce::dontSendNotification);
+    gTabEnv.setToggleState(t == 1, juce::dontSendNotification);
 }
 
 void SamplerEditor::setTab(int t) {

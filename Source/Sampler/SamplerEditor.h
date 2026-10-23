@@ -33,6 +33,7 @@ public:
     /** Pour les tests : selectionne une zone par son rang. */
     void selectRow(int row) { list.selectRow(row); }
     void showTab(int t) { setTab(t); }
+    void showGlobalTab(int t) { setGlobalTab(t); }
 
 private:
     // ListBoxModel
@@ -57,7 +58,25 @@ private:
     bool updatingUi = false;
     bool dragOver = false;
 
-    juce::TextButton addButton, spreadButton, removeButton, clearButton;
+    juce::TextButton addButton, spreadButton, removeButton, organiseButton;
+
+    // banques de sons
+    juce::TextButton bankPrev, bankNext, bankSave;
+    juce::ComboBox bankBox;
+    juce::Array<juce::File> bankFiles;
+    void refreshBankList();
+    void bankChosen();
+    void stepBank(int delta);
+    void askSaveBank();
+    void showOrganiseMenu();
+
+    // onglets du panneau global
+    juce::TextButton gTabMain, gTabEnv;
+    juce::Label gEnvHint;
+    int gtab = 0;
+    int infoTicks = 0;
+    juce::String lastInfo;
+    void setGlobalTab(int t);
     juce::ListBox list { "zones", this };
     juce::Label statusLabel, zoneTitle, zoneInfo, emptyHint;
 
@@ -83,6 +102,9 @@ private:
     juce::Slider voicesS, speedS, transposeS, velocityS, bendS, gainS, positionS, smoothS;
     juce::Label voicesL, speedL, transposeL, velocityL, bendL, gainL, positionL, smoothL;
     juce::ToggleButton followT, lockT;
+    // enveloppe de position pilotable (automation / MIDI)
+    juce::Slider envOfsS[4], envTimeS[3], lfoRateG, lfoDepthG;
+    juce::Label envOfsL[4], envTimeL[3], lfoRateGL, lfoDepthGL;
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::vector<std::unique_ptr<SA>> sliderAtt;

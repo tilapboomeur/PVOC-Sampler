@@ -61,6 +61,23 @@ public:
     void removeZone(uint32_t id);
     void removeAllZones();
     void autoSpread();
+
+    // ----- tri de la liste des sons
+    enum class SortMode { ByNote, ByName, Reverse };
+    void sortZones(SortMode mode);
+    void setAutoSort(bool on);
+    bool getAutoSort() const { return autoSort.load(); }
+
+    // ----- banques de sons
+    static juce::File getBanksFolder();                    // Documents/Sampler PVoc/Banques
+    static juce::Array<juce::File> listBanks();
+    /** Enregistre la banque (synchrone). copySounds : copie les sons dans "<nom> (sons)". Renvoie l'erreur. */
+    juce::String saveBankNow(const juce::File& bankFile, bool copySounds);
+    void saveBank(const juce::File& bankFile, bool copySounds);          // en arriere-plan
+    /** Ouvre une banque (les sons se chargent en arriere-plan). Renvoie l'erreur. */
+    juce::String loadBank(const juce::File& bankFile);
+    juce::File getCurrentBank() const;
+    juce::String getInfoMessage() const;
     bool isLoading() const { return loadingCount.load() > 0; }
     juce::String getLastError() const;
 
@@ -107,6 +124,10 @@ private:
     };
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    /** Etat complet ; relativeTo non nul : chemins des sons relatifs a ce dossier quand c'est possible. */
+    juce::ValueTree createStateTree(const juce::File* relativeTo);
+    void applyStateTree(juce::ValueTree state, const juce::File& baseDir);
+    void sortLocked(SortMode mode);   // zonesLock tenu
     void timerCallback() override;
     void publishZones();                                  // reconstruit l'instantane pour le thread audio
     std::shared_ptr<const pvoc::PlayerBuffer> buildBuffer(const ZoneData& z, double rate, juce::String& info) const;
@@ -124,7 +145,10 @@ private:
     mutable juce::CriticalSection zonesLock;
     std::vector<ZoneData> zones;
     uint32_t nextId = 1;
-    juce::String lastError;
+    juce::String lastError, infoMessage;
+    juce::File currentBank;
+    std::atomic<bool> autoSort { true };
+    std::atomic<bool> restoring { false };
     juce::AudioFormatManager formats;
     juce::ThreadPool loader { 2 };
     std::atomic<int> loadingCount { 0 };
@@ -158,6 +182,13 @@ private:
     std::atomic<float>* pFollow = nullptr;
     std::atomic<float>* pPosition = nullptr;
     std::atomic<float>* pSmooth = nullptr;
+    // enveloppe de position pilotable (automation / MIDI), appliquee a tous les sons
+    std::atomic<float>* pEnvOfs[4] = {};     // decalages depart, pic, maintien, fin (%)
+    std::atomic<float>* pEnvTime[3] = {};    // echelles des durees A, D, R (%)
+    std::atomic<float>* pLfoRate = nullptr;  // echelle de la vitesse du LFO (%)
+    std::atomic<float>* pLfoDepth = nullptr; // echelle de la profondeur du LFO (%)
+    float envOfsCur[4] = {};                 // decalages lisses
+    pvoc::ZoneSettings effectiveEnv(const pvoc::ZoneSettings& s) const;
     juce::SmoothedValue<float> masterGain;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SamplerProcessor)
