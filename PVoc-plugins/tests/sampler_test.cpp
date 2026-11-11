@@ -1,0 +1,537 @@
+// Tests du Sampler PVoc (processeur complet + interface), sans hote.
+#include "../Source/Sampler/SamplerProcessor.h"
+#include "../Source/Sampler/SamplerEditor.h"
+
+#include <cmath>
+#include <cstdio>
+
+static int failures = 0;
+static void check(bool ok, const juce::String& what) {
+    std::printf("%s %s\n", ok ? "[OK]  " : "[ECHEC]", what.toRawUTF8());
+    if (!ok) ++failures;
+}
+
+static const double sr = 48000.0;
+
+static juce::File makeSine(const juce::String& name, double freq, double seconds, double rate) {
+    const auto f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(name);
+    f.deleteFile();
+    juce::WavAudioFormat fmt;
+    std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(f);
+    auto w = fmt.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(rate).withNumChannels(2).withBitsPerSample(24));
+    const int n = (int) (seconds * rate);
+    juce::AudioBuffer<float> b(2, n);
+    for (int i = 0; i < n; ++i) {
+        const float v = 0.5f * (float) std::sin(2 * juce::MathConstants<double>::pi * freq * i / rate);
+        b.setSample(0, i, v);
+        b.setSample(1, i, v);
+    }
+    w->writeFromAudioSampleBuffer(b, 0, n);
+    return f;
+}
+
+struct Rig {
+    SamplerProcessor p;
+    std::vector<float> out;
+    Rig() {
+        p.setPlayConfigDetails(0, 2, sr, 512);
+        p.prepareToPlay(sr, 512);
+    }
+    /** Joue n echantillons ; events = (position, message). */
+    std::vector<float> run(int n, std::vector<std::pair<int, juce::MidiMessage>> events = {}) {
+        std::vector<float> o;
+        for (int pos = 0; pos < n; pos += 512) {
+            const int k = std::min(512, n - pos);
+            juce::AudioBuffer<float> b(2, k);
+            juce::MidiBuffer m;
+            for (auto& e : events)
+                if (e.first >= pos && e.first < pos + k) m.addEvent(e.second, e.first - pos);
+            p.processBlock(b, m);
+            for (int i = 0; i < k; ++i) o.push_back(b.getSample(0, i));
+        }
+        return o;
+    }
+    void set(const char* id, float v) {
+        auto* prm = p.params.getParameter(id);
+        prm->setValueNotifyingHost(prm->convertTo0to1(v));
+    }
+};
+
+static double goertzel(const std::vector<float>& x, size_t a, size_t b, double f) {
+    double re = 0, im = 0;
+    for (size_t i = a; i < b; ++i) {
+        const double w = 0.5 - 0.5 * std::cos(2 * juce::MathConstants<double>::pi * (double) (i - a) / (double) (b - a));
+        re += x[i] * w * std::cos(2 * juce::MathConstants<double>::pi * f * (double) i / sr);
+        im += x[i] * w * std::sin(2 * juce::MathConstants<double>::pi * f * (double) i / sr);
+    }
+    return 4.0 * std::sqrt(re * re + im * im) / (double) (b - a);   // ~ amplitude
+}
+
+static double freqOf(const std::vector<float>& x, size_t a, size_t b) {
+    double first = -1, last = -1;
+    int cnt = 0;
+    for (size_t i = a + 1; i < b; ++i)
+        if (x[i - 1] < 0 && x[i] >= 0) {
+            const double t = (double) i - 1 + x[i - 1] / (x[i - 1] - x[i]);
+            if (first < 0) first = t;
+            last = t;
+            ++cnt;
+        }
+    return cnt > 1 ? (cnt - 1) * sr / (last - first) : 0.0;
+}
+
+static double peak(const std::vector<float>& x, size_t a, size_t b) {
+    double s = 0;
+    for (size_t i = a; i < b; ++i) s += x[i] * x[i];
+    return std::sqrt(2.0 * s / (double) (b - a));
+}
+
+static juce::MidiMessage on(int n, float v = 1.0f) { return juce::MidiMessage::noteOn(1, n, v); }
+/** Reglages d'un son retrouve par son identifiant (l'ordre de la liste depend du tri). */
+static pvoc::ZoneSettings zoneOf(SamplerProcessor& p, uint32_t id) {
+    for (auto& z : p.getZones()) if (z.id == id) return z.settings;
+    return {};
+}
+static SamplerProcessor::ZoneInfo infoByName(SamplerProcessor& p, const juce::String& name) {
+    for (auto& z : p.getZones()) if (z.file.getFileName() == name) return z;
+    return {};
+}
+static juce::MidiMessage off(int n) { return juce::MidiMessage::noteOff(1, n); }
+
+int main(int argc, char** argv) {
+    juce::ScopedJuceInitialiser_GUI gui;
+
+    // noms de notes
+    check(pvoc::noteFromFileName("Sinus_A3.wav") == 69, "nom de fichier : Sinus_A3 -> A3 (69)");
+    check(pvoc::noteFromFileName("Voix Do3.wav") == 60, "nom de fichier : Voix Do3 -> Do3 (60)");
+    check(pvoc::noteFromFileName(juce::String::fromUTF8("basse_r\xc3\xa9#1.wav")) == 39, "nom de fichier : basse_ré#1 -> 39");
+    check(pvoc::noteFromFileName("Flute F#2 take2.wav") == 54, "nom de fichier : Flute F#2 -> 54");
+    check(pvoc::noteFromFileName("Ambiance.wav") == -1, "nom de fichier sans note -> aucune");
+    check(pvoc::noteName(60) == "C3" && pvoc::noteNameFr(60) == "Do3", "noms : 60 = C3 = Do3");
+
+    const auto aigu = makeSine("Sinus_A3.wav", 440.0, 2.0, 44100.0);
+    const auto grave = makeSine("Basse_A1.wav", 110.0, 2.0, 44100.0);
+
+    Rig r;
+    r.set("gain", 0.0f);
+    r.set("velocity", 0.0f);
+    const uint32_t idA = r.p.addFileNow(aigu);
+    const uint32_t idB = r.p.addFileNow(grave);
+    check(idA != 0 && idB != 0, "chargement de deux sons (44,1 kHz -> 48 kHz)");
+    auto zs = r.p.getZones();
+    check(zs.size() == 2 && zoneOf(r.p, idA).root == 69 && zoneOf(r.p, idB).root == 45, "notes de base lues dans les noms (A3, A1)");
+    check(zoneOf(r.p, idB).low == 0 && zoneOf(r.p, idB).high == 57 && zoneOf(r.p, idA).low == 58 && zoneOf(r.p, idA).high == 127,
+          "plages reparties automatiquement : A1 0-57, A3 58-127");
+    check(zs[0].id == idB && zs[1].id == idA, "tri automatique : le son grave (A1) passe en tete de liste");
+    r.run(1024);
+
+    // 1) transposition par la note, durée conservée
+    {
+        auto o = r.run((int) (sr * 1.0), { { 0, on(81) } });
+        const double f = freqOf(o, 9600, o.size());
+        check(std::abs(f - 880.0) < 0.5, "A4 sur le son A3 : " + juce::String(f, 2) + " Hz (attendu 880)");
+        check(std::abs(peak(o, 9600, o.size()) - 0.5) < 0.02, "niveau " + juce::String(peak(o, 9600, o.size()), 3));
+        r.run((int) sr, { { 0, off(81) } });
+    }
+    // 2) bonne zone : D2 (50) -> son grave transposé de +5
+    {
+        auto o = r.run((int) (sr * 1.0), { { 0, on(50) } });
+        const double f = freqOf(o, 9600, o.size());
+        check(std::abs(f - 110.0 * std::pow(2.0, 5.0 / 12.0)) < 0.5, "D2 sur la zone grave : " + juce::String(f, 2) + " Hz (attendu 146,83)");
+        // 3) mode tenu : silence apres le relachement (200 ms)
+        auto o2 = r.run((int) (sr * 0.6), { { 0, off(50) } });
+        check(peak(o2, (size_t) (sr * 0.35), o2.size()) < 1e-3, "mode tenu : silence apres le relachement");
+        check(r.p.getActiveVoices() == 0, "voix liberee");
+    }
+    // 4) polyphonie : accord de 3 notes avec 2 voix -> la plus ancienne est volee
+    {
+        r.set("voices", 2.0f);
+        auto o = r.run((int) (sr * 1.0), { { 0, on(69) }, { 4800, on(73) }, { 9600, on(76) } });
+        const double f69 = goertzel(o, 24000, o.size(), 440.0), f73 = goertzel(o, 24000, o.size(), 440.0 * std::pow(2.0, 4.0 / 12.0)),
+                     f76 = goertzel(o, 24000, o.size(), 440.0 * std::pow(2.0, 7.0 / 12.0));
+        check(r.p.getActiveVoices() == 2, "2 voix : " + juce::String(r.p.getActiveVoices()) + " voix actives");
+        check(f73 > 0.4 && f76 > 0.4 && f69 < 0.02, "2 voix : la 1re note est remplacee (" + juce::String(f69, 3) + " / "
+                                                        + juce::String(f73, 3) + " / " + juce::String(f76, 3) + ")");
+        r.run((int) sr, { { 0, off(69) }, { 0, off(73) }, { 0, off(76) } });
+        r.set("voices", 16.0f);
+        o = r.run((int) (sr * 1.0), { { 0, on(69) }, { 0, on(73) }, { 0, on(76) }, { 0, on(81) } });
+        check(r.p.getActiveVoices() == 4 && goertzel(o, 12000, o.size(), 440.0) > 0.4 && goertzel(o, 12000, o.size(), 880.0) > 0.4,
+              "16 voix : accord de 4 notes complet");
+        r.run((int) sr, { { 0, off(69) }, { 0, off(73) }, { 0, off(76) }, { 0, off(81) } });
+        r.set("voices", 1.0f);
+        r.run((int) (sr * 0.5), { { 0, on(69) }, { 2400, on(76) } });
+        check(r.p.getActiveVoices() == 1, "mono : une seule voix");
+        r.run((int) sr, { { 0, off(69) }, { 0, off(76) } });
+        r.set("voices", 8.0f);
+    }
+    // 5) one-shot : continue apres le relachement puis s'arrete a la fin du son (2 s)
+    {
+        auto s = zoneOf(r.p, idA);
+        s.mode = pvoc::PlayMode::OneShot;
+        r.p.updateZone(idA, s);
+        r.run(1024);
+        auto o = r.run((int) (sr * 3.0), { { 0, on(69) }, { 2400, off(69) } });
+        check(peak(o, (size_t) (sr * 0.5), (size_t) (sr * 1.5)) > 0.45, "one-shot : joue apres le relachement");
+        check(peak(o, (size_t) (sr * 2.3), o.size()) < 1e-3 && r.p.getActiveVoices() == 0, "one-shot : s'arrete a la fin du son");
+        s.mode = pvoc::PlayMode::Hold;
+        r.p.updateZone(idA, s);
+        r.run(1024);
+    }
+    // 6) pedale de sustain
+    {
+        auto o = r.run((int) (sr * 1.0), { { 0, juce::MidiMessage::controllerEvent(1, 64, 127) }, { 0, on(69) }, { 2400, off(69) } });
+        check(peak(o, (size_t) (sr * 0.5), o.size()) > 0.45, "sustain : la note tient apres le relachement");
+        o = r.run((int) (sr * 0.6), { { 0, juce::MidiMessage::controllerEvent(1, 64, 0) } });
+        check(peak(o, (size_t) (sr * 0.35), o.size()) < 1e-3, "sustain relache : la note s'eteint");
+    }
+    // 7) pitch bend (+2 demi-tons) et velocite
+    {
+        auto o = r.run((int) sr, { { 0, juce::MidiMessage::pitchWheel(1, 16383) }, { 0, on(69) } });
+        const double f = freqOf(o, 12000, o.size());
+        check(std::abs(f - 440.0 * std::pow(2.0, 2.0 * 8191.0 / 8192.0 / 12.0)) < 0.5, "pitch bend +2 : " + juce::String(f, 2) + " Hz");
+        r.run((int) sr, { { 0, off(69) }, { 0, juce::MidiMessage::pitchWheel(1, 8192) } });
+        r.set("velocity", 100.0f);
+        o = r.run((int) sr, { { 0, on(69, 0.5f) } });
+        check(std::abs(peak(o, 12000, o.size()) - 0.125) < 0.01, "velocite 64 (sensibilite 100 %) : niveau " + juce::String(peak(o, 12000, o.size()), 3));
+        r.run((int) sr, { { 0, off(69) } });
+        r.set("velocity", 0.0f);
+    }
+    // 8) vitesse globale : 50 % -> le son de 2 s dure 4 s en one-shot
+    {
+        auto s = zoneOf(r.p, idA);
+        s.mode = pvoc::PlayMode::OneShot;
+        r.p.updateZone(idA, s);
+        r.set("speed", 50.0f);
+        r.run(1024);
+        auto o = r.run((int) (sr * 5.0), { { 0, on(69) }, { 100, off(69) } });
+        check(peak(o, (size_t) (sr * 3.5), (size_t) (sr * 3.8)) > 0.4 && peak(o, (size_t) (sr * 4.3), o.size()) < 1e-3,
+              "vitesse 50 % : le son de 2 s dure 4 s, a la meme hauteur (" + juce::String(freqOf(o, 24000, 96000), 1) + " Hz)");
+        r.set("speed", 100.0f);
+        s.mode = pvoc::PlayMode::Hold;
+        r.p.updateZone(idA, s);
+        r.run(1024);
+    }
+    // 9) sauvegarde / restauration
+    {
+        auto s = zoneOf(r.p, idB);
+        s.loop = true;
+        s.releaseMs = 777.0f;
+        r.p.updateZone(idB, s);
+        juce::MemoryBlock st;
+        r.p.getStateInformation(st);
+        Rig q;
+        q.p.setStateInformation(st.getData(), (int) st.getSize());
+        for (int i = 0; i < 500 && (q.p.isLoading() || q.p.getZones().size() < 2); ++i) juce::Thread::sleep(10);
+        juce::Thread::sleep(50);
+        auto qz = q.p.getZones();
+        const auto qb = infoByName(q.p, "Basse_A1.wav").settings, qa = infoByName(q.p, "Sinus_A3.wav").settings;
+        check(qz.size() == 2 && qb.loop && std::abs(qb.releaseMs - 777.0f) < 0.01f && qb.root == 45 && qa.low == 58,
+              "etat : sons et reglages des zones restaures");
+        q.run(1024);
+        auto o = q.run((int) sr, { { 0, on(81) } });
+        check(std::abs(freqOf(o, 9600, o.size()) - 880.0) < 0.5, "etat : le sampler restaure joue juste");
+    }
+
+    // 11) enveloppe de position : son de 2 s, 300 Hz puis 900 Hz a mi-chemin
+    {
+        const auto f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("Deux_A3.wav");
+        {
+            f.deleteFile();
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream>(f);
+            auto w = fmt.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(48000).withNumChannels(2).withBitsPerSample(24));
+            juce::AudioBuffer<float> b(2, 96000);
+            for (int i = 0; i < 96000; ++i) {
+                const float v = 0.5f * (float) std::sin(2 * juce::MathConstants<double>::pi * (i < 48000 ? 300.0 : 900.0) * i / 48000.0);
+                b.setSample(0, i, v);
+                b.setSample(1, i, v);
+            }
+            w->writeFromAudioSampleBuffer(b, 0, 96000);
+        }
+        Rig e;
+        e.set("gain", 0.0f);
+        e.set("velocity", 0.0f);
+        const uint32_t id = e.p.addFileNow(f);
+        auto s = e.p.getZones()[0].settings;
+        s.posEnv = true;
+        s.pStart = 10; s.pPeak = 80; s.pSustain = 25; s.pEnd = 90;
+        s.aMs = 300; s.dMs = 300; s.rMs = 300; s.releaseMs = 200;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        auto hi = [](const std::vector<float>& o, double a, double b) {
+            const double g3 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 300.0), g9 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 900.0);
+            return g9 > 3 * g3 ? 1 : (g3 > 3 * g9 ? -1 : 0);   // 1 = 900 Hz (2e moitie), -1 = 300 Hz (1re moitie)
+        };
+        auto o = e.run((int) (sr * 3.0), { { 0, on(69) }, { (int) (sr * 2.0), off(69) } });
+        check(hi(o, 0.03, 0.12) == -1, "enveloppe A : depart a 10 % (1re moitie du son)");
+        check(hi(o, 0.33, 0.40) == 1, "enveloppe A : pic a 80 % atteint en 300 ms (2e moitie)");
+        check(hi(o, 0.90, 1.90) == -1, "enveloppe S : maintien a 25 % tant que la touche est tenue");
+        check(hi(o, 2.22, 2.30) == 1, "enveloppe R : glisse vers la fin (90 %) apres le relachement");
+        check(peak(o, (size_t) (1.0 * sr), (size_t) (1.9 * sr)) > 0.45, "enveloppe S : son tenu sans perte de niveau");
+        check(peak(o, (size_t) (2.62 * sr), o.size()) < 1e-3 && e.p.getActiveVoices() == 0,
+              "enveloppe R : fondu de volume apres la position de fin, puis silence");
+
+        // LFO : maintien a 45 %, +/- 10 % a 1 Hz -> la position traverse la moitie du son
+        s.aMs = 0; s.dMs = 0; s.pPeak = 45; s.pSustain = 45;
+        s.lfo = false;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 2.5), { { 0, on(69) } });
+        int n9 = 0, n3 = 0;
+        for (double t0 = 0.3; t0 < 2.4; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+        check(n9 == 0 && n3 > 15, "sans LFO : position figee (" + juce::String(n3) + " fenetres a 300 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+        s.lfo = true; s.lfoShape = 0; s.lfoRate = 1.0f; s.lfoDepth = 10.0f;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 2.5), { { 0, on(69) } });
+        n9 = 0; n3 = 0;
+        for (double t0 = 0.3; t0 < 2.4; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+        check(n9 >= 4 && n3 >= 4, "LFO sinus 1 Hz : la position oscille (" + juce::String(n9) + " fenetres a 900 Hz, "
+                                      + juce::String(n3) + " a 300 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+        for (int shape : { 1, 2 }) {
+            s.lfoShape = shape;
+            s.lfoDepth = 20.0f;
+            if (shape == 2) {   // aleatoire : centre sur 50 %, ~9 tirages, graine fixe pour un test reproductible
+                s.pPeak = 50.0f;
+                s.pSustain = 50.0f;
+                s.lfoRate = 3.0f;
+                e.p.setRandomSeed(12345);
+            }
+            e.p.updateZone(id, s);
+            e.run(1024);
+            o = e.run((int) (sr * 3.0), { { 0, on(69) } });
+            n9 = 0; n3 = 0;
+            for (double t0 = 0.3; t0 < 2.9; t0 += 0.1) { const int h = hi(o, t0, t0 + 0.1); n9 += h == 1; n3 += h == -1; }
+            check(n9 >= 2 && n3 >= 2, juce::String(shape == 1 ? "LFO triangle" : frs("LFO aléatoire")) + " : la position bouge ("
+                                          + juce::String(n9) + " / " + juce::String(n3) + ")");
+            e.run((int) sr, { { 0, off(69) } });
+        }
+
+        // one-shot : A, D puis R automatiquement, sans attendre le relachement
+        s.lfo = false;
+        s.mode = pvoc::PlayMode::OneShot;
+        s.pStart = 10; s.pPeak = 80; s.pSustain = 25; s.pEnd = 90;
+        s.aMs = 200; s.dMs = 200; s.rMs = 200; s.releaseMs = 100;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        o = e.run((int) (sr * 1.5), { { 0, on(69) }, { 4800, off(69) } });
+        check(hi(o, 0.22, 0.28) == 1 && hi(o, 0.45, 0.52) == -1 && hi(o, 0.60, 0.62) == 1,
+              "one-shot : A puis D puis R enchaines");
+        check(peak(o, (size_t) (0.85 * sr), o.size()) < 1e-3 && e.p.getActiveVoices() == 0, "one-shot : s'arrete apres R");
+
+        // sauvegarde des reglages de l'enveloppe
+        juce::MemoryBlock st;
+        e.p.getStateInformation(st);
+        Rig q;
+        q.p.setStateInformation(st.getData(), (int) st.getSize());
+        for (int i = 0; i < 500 && (q.p.isLoading() || q.p.getZones().empty()); ++i) juce::Thread::sleep(10);
+        juce::Thread::sleep(50);
+        const auto qs = q.p.getZones()[0].settings;
+        check(qs.posEnv && qs.pPeak == 80.0f && qs.rMs == 200.0f && qs.lfoShape == 2 && qs.lfoDepth == 20.0f,
+              "etat : enveloppe de position et LFO restaures");
+    }
+
+    // 12) tri des sons
+    {
+        Rig t2;
+        const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory);
+        const auto fC = makeSine("Tri_C4.wav", 523.25, 0.3, 48000.0), fA = makeSine("Tri_A1.wav", 110.0, 0.3, 48000.0),
+                   fE = makeSine("Tri_E3.wav", 329.63, 0.3, 48000.0);
+        juce::ignoreUnused(tmp);
+        t2.p.setAutoSort(false);
+        t2.p.addFileNow(fC);
+        t2.p.addFileNow(fA);
+        t2.p.addFileNow(fE);
+        auto names = [&] {
+            juce::StringArray a;
+            for (auto& z : t2.p.getZones()) a.add(z.file.getFileNameWithoutExtension());
+            return a.joinIntoString(",");
+        };
+        check(names() == "Tri_C4,Tri_A1,Tri_E3", "sans tri : ordre d'ajout (" + names() + ")");
+        t2.p.sortZones(SamplerProcessor::SortMode::ByNote);
+        check(names() == "Tri_A1,Tri_E3,Tri_C4", "tri par note (" + names() + ")");
+        t2.p.sortZones(SamplerProcessor::SortMode::Reverse);
+        check(names() == "Tri_C4,Tri_E3,Tri_A1", "inverser l'ordre (" + names() + ")");
+        t2.p.sortZones(SamplerProcessor::SortMode::ByName);
+        check(names() == "Tri_A1,Tri_C4,Tri_E3", "tri par nom (" + names() + ")");
+        t2.p.setAutoSort(true);
+        check(names() == "Tri_A1,Tri_E3,Tri_C4", "tri automatique active : remis par note (" + names() + ")");
+        const auto fG = makeSine("Tri_G2.wav", 196.0, 0.3, 48000.0);
+        t2.p.addFileNow(fG);
+        check(names() == "Tri_A1,Tri_G2,Tri_E3,Tri_C4", "tri automatique : un son ajoute prend sa place (" + names() + ")");
+        // chargement de plusieurs sons : ordre demande respecte
+        Rig t3;
+        t3.p.setAutoSort(false);
+        juce::Array<juce::File> batch { fE, fC, fG, fA };
+        t3.p.addFiles(batch);
+        for (int i = 0; i < 500 && (t3.p.isLoading() || t3.p.getZones().size() < 4); ++i) juce::Thread::sleep(10);
+        juce::StringArray a;
+        for (auto& z : t3.p.getZones()) a.add(z.file.getFileNameWithoutExtension());
+        check(a.joinIntoString(",") == "Tri_E3,Tri_C4,Tri_G2,Tri_A1", "ajout groupe : ordre de selection respecte (" + a.joinIntoString(",") + ")");
+    }
+
+    // 13) banques de sons
+    {
+        const auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pvoc_banques_test");
+        base.deleteRecursively();
+        const auto bankFile = base.getChildFile("Ma banque.pvocbank");
+        r.set("voices", 5.0f);
+        r.set("envSustain", 12.5f);
+        auto s = zoneOf(r.p, idB);
+        s.releaseMs = 321.0f;
+        r.p.updateZone(idB, s);
+        const auto err = r.p.saveBankNow(bankFile, true);
+        check(err.isEmpty() && bankFile.existsAsFile(), "banque : enregistree " + err);
+        const auto snd = base.getChildFile("Ma banque (sons)");
+        check(snd.getChildFile("Sinus_A3.wav").existsAsFile() && snd.getChildFile("Basse_A1.wav").existsAsFile(),
+              "banque : sons copies dans « Ma banque (sons) »");
+        check(infoByName(r.p, "Sinus_A3.wav").file.isAChildOf(snd), "banque : le sampler utilise maintenant les copies");
+        check(r.p.getCurrentBank() == bankFile, "banque : banque courante");
+        // la banque se deplace avec ses sons (chemins relatifs)
+        const auto moved = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pvoc_banques_deplacees");
+        moved.deleteRecursively();
+        base.copyDirectoryTo(moved);
+        Rig q;
+        const auto lerr = q.p.loadBank(moved.getChildFile("Ma banque.pvocbank"));
+        for (int i = 0; i < 500 && (q.p.isLoading() || q.p.getZones().size() < 2); ++i) juce::Thread::sleep(10);
+        juce::Thread::sleep(50);
+        const auto qb = infoByName(q.p, "Basse_A1.wav");
+        check(lerr.isEmpty() && q.p.getZones().size() == 2 && qb.file.isAChildOf(moved.getChildFile("Ma banque (sons)")),
+              "banque deplacee : sons retrouves a cote d'elle");
+        check(std::abs(qb.settings.releaseMs - 321.0f) < 0.01f && (int) q.p.params.getRawParameterValue("voices")->load() == 5
+                  && std::abs(q.p.params.getRawParameterValue("envSustain")->load() - 12.5f) < 0.01f,
+              "banque : reglages des sons et reglages globaux restaures");
+        q.run(1024);
+        auto o = q.run((int) sr, { { 0, on(81) } });
+        check(std::abs(freqOf(o, 9600, o.size()) - 880.0) < 0.5, "banque : le sampler charge joue juste");
+        check(q.p.loadBank(base.getChildFile("rien.pvocbank")).isNotEmpty(), "banque : fichier invalide refuse");
+        // sans copie : chemins absolus
+        const auto bank2 = base.getChildFile("Sans copie.pvocbank");
+        check(r.p.saveBankNow(bank2, false).isEmpty() && !base.getChildFile("Sans copie (sons)").exists(),
+              "banque sans copie : pas de dossier de sons");
+        r.set("voices", 8.0f);
+        r.set("envSustain", 0.0f);
+    }
+
+    // 14) enveloppe de position pilotable (automation / MIDI)
+    {
+        const auto f = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("Deux_A3.wav");
+        Rig e;
+        e.set("gain", 0.0f);
+        e.set("velocity", 0.0f);
+        const uint32_t id = e.p.addFileNow(f);
+        auto s = zoneOf(e.p, id);
+        s.posEnv = true;
+        s.pStart = 10; s.pPeak = 80; s.pSustain = 25; s.pEnd = 90;
+        s.aMs = 300; s.dMs = 300; s.rMs = 300; s.releaseMs = 200;
+        e.p.updateZone(id, s);
+        e.run(1024);
+        auto hi = [](const std::vector<float>& o, double a, double b) {
+            const double g3 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 300.0), g9 = goertzel(o, (size_t) (a * sr), (size_t) (b * sr), 900.0);
+            return g9 > 3 * g3 ? 1 : (g3 > 3 * g9 ? -1 : 0);
+        };
+        // maintien deplace en direct pendant la note tenue : 25 % -> 75 %
+        auto o = e.run((int) (sr * 1.5), { { 0, on(69) } });
+        check(hi(o, 1.0, 1.4) == -1, "maintien a 25 % (300 Hz)");
+        e.set("envSustain", 50.0f);
+        o = e.run((int) (sr * 0.6));
+        check(hi(o, 0.15, 0.55) == 1, "Env. maintien +50 % en direct : la note tenue passe a 75 % (900 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+        e.set("envSustain", 0.0f);
+        e.run(4096);
+        // echelle des durees : A deux fois plus long
+        o = e.run((int) (sr * 0.5), { { 0, on(69) } });
+        check(hi(o, 0.18, 0.24) == 1, "Env. durée A 100 % : pic presque atteint a 0,2 s");
+        e.run((int) sr, { { 0, off(69) } });
+        e.set("envA", 200.0f);
+        o = e.run((int) (sr * 0.8), { { 0, on(69) } });
+        check(hi(o, 0.18, 0.24) == -1 && hi(o, 0.62, 0.70) == 1, "Env. durée A 200 % : l'attaque dure deux fois plus longtemps");
+        e.run((int) sr, { { 0, off(69) } });
+        e.set("envA", 100.0f);
+        // profondeur du LFO a 0 % : position figee
+        s.aMs = 0; s.dMs = 0; s.pPeak = 50; s.pSustain = 50;
+        s.lfo = true; s.lfoShape = 0; s.lfoRate = 2.0f; s.lfoDepth = 15.0f;
+        e.p.updateZone(id, s);
+        e.set("envSustain", -5.0f);
+        e.set("lfoDepth", 0.0f);
+        e.run(1024);
+        o = e.run((int) (sr * 2.0), { { 0, on(69) } });
+        int n9 = 0;
+        for (double t0 = 0.3; t0 < 1.9; t0 += 0.1) n9 += hi(o, t0, t0 + 0.1) == 1;
+        check(n9 == 0, "LFO profondeur 0 % : position figee a 45 %");
+        e.set("lfoDepth", 100.0f);
+        o = e.run((int) (sr * 2.0));
+        n9 = 0;
+        for (double t0 = 0.0; t0 < 1.9; t0 += 0.1) n9 += hi(o, t0, t0 + 0.1) == 1;
+        check(n9 >= 3, "LFO profondeur 100 % en direct : la position oscille (" + juce::String(n9) + " fenetres a 900 Hz)");
+        e.run((int) sr, { { 0, off(69) } });
+    }
+
+    // charge processeur : 16 voix pendant 10 s de son (information, pas un test)
+    {
+        r.set("voices", 16.0f);
+        auto s = zoneOf(r.p, idA);
+        s.loop = true;
+        r.p.updateZone(idA, s);
+        r.run(1024);
+        std::vector<std::pair<int, juce::MidiMessage>> ev;
+        for (int k = 0; k < 16; ++k) ev.push_back({ 0, on(60 + k) });
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        r.run((int) (sr * 10.0), ev);
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        std::printf("[INFO]  16 voix : %.0f ms de calcul pour 10 s de son (%.1f %% d'un coeur)\n", ms, ms / 100.0);
+        std::vector<std::pair<int, juce::MidiMessage>> offs;
+        for (int k = 0; k < 16; ++k) offs.push_back({ 0, off(60 + k) });
+        r.run((int) sr, offs);
+        s.loop = false;
+        r.p.updateZone(idA, s);
+        r.run(1024);
+    }
+
+    // 10) interface
+    if (argc > 1) {
+        r.set("voices", 8.0f);
+        r.run(4096, { { 0, on(69) }, { 0, on(73) }, { 0, on(76) } });
+        r.p.keyboardState.noteOn(1, 69, 1.0f);
+        r.p.keyboardState.noteOn(1, 73, 1.0f);
+        r.p.keyboardState.noteOn(1, 76, 1.0f);
+        std::unique_ptr<juce::AudioProcessorEditor> ed(r.p.createEditor());
+        ed->setVisible(true);
+        static_cast<SamplerEditor*>(ed.get())->selectRow(1);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(300);
+        auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
+        juce::File png(argv[1]);
+        png.deleteFile();
+        {
+            juce::FileOutputStream os(png);
+            juce::PNGImageFormat().writeImageToStream(img, os);
+        }
+        check(png.getSize() > 0, "interface : capture " + png.getFullPathName());
+        // capture de l'onglet Enveloppe de position
+        if (argc > 2) {
+            auto s = zoneOf(r.p, idA);
+            s.posEnv = true; s.pStart = 5; s.pPeak = 70; s.pSustain = 40; s.pEnd = 95;
+            s.aMs = 400; s.dMs = 700; s.rMs = 1200;
+            s.lfo = true; s.lfoShape = 0; s.lfoRate = 0.8f; s.lfoDepth = 6.0f;
+            r.p.updateZone(idA, s);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(200);
+            static_cast<SamplerEditor*>(ed.get())->selectRow(1);   // Sinus_A3 (la liste est triee par note)
+            static_cast<SamplerEditor*>(ed.get())->showTab(1);
+            static_cast<SamplerEditor*>(ed.get())->showGlobalTab(1);
+            r.set("envSustain", 15.0f);
+            r.set("envR", 150.0f);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(300);
+            auto img2 = ed->createComponentSnapshot(ed->getLocalBounds(), true, 2.0f);
+            juce::File png2(argv[2]);
+            png2.deleteFile();
+            juce::FileOutputStream os2(png2);
+            juce::PNGImageFormat().writeImageToStream(img2, os2);
+            check(png2.getSize() > 0, "interface : capture de l'enveloppe " + png2.getFullPathName());
+        }
+    }
+
+    std::printf("\n%s (%d echec(s))\n", failures == 0 ? "TOUS LES TESTS DU SAMPLER PASSENT" : "DES TESTS ECHOUENT", failures);
+    return failures == 0 ? 0 : 1;
+}
