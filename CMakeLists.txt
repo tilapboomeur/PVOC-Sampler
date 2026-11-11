@@ -115,11 +115,57 @@ target_link_libraries(SamplerPVoc
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
 
+# ------------------------------------------------------------------ Effet PVoc (effet controle par MIDI)
+juce_add_plugin(EffetPVoc
+    COMPANY_NAME "Lecteur PVoc"
+    BUNDLE_ID "be.pvoc.effet.plugin"
+    PLUGIN_MANUFACTURER_CODE Lpvc
+    PLUGIN_CODE Pvfx
+    FORMATS ${PVOC_FORMATS}
+    PRODUCT_NAME "Effet PVoc"
+    DESCRIPTION "Effets spectraux en direct : gel, pitch-shift, robot, decalage de frequence, cross-synthese"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    AU_MAIN_TYPE kAudioUnitType_MusicEffect
+    VST3_CATEGORIES Fx Pitch Shift
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "L'Effet PVoc traite le son de l'entree audio."
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    NEEDS_WEB_BROWSER FALSE
+    NEEDS_CURL FALSE)
+
+target_sources(EffetPVoc PRIVATE
+    Source/Effect/SpectralFx.cpp
+    Source/Effect/EffectProcessor.cpp
+    Source/Effect/EffectEditor.cpp)
+
+target_include_directories(EffetPVoc PRIVATE Source)
+
+target_compile_definitions(EffetPVoc PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0)
+
+target_link_libraries(EffetPVoc
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_audio_formats
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags)
+
 # Tests (moteur seul, sans JUCE) : cmake -DPVOC_TESTS=ON
 option(PVOC_TESTS "Compiler les tests" OFF)
 if(PVOC_TESTS)
     target_compile_definitions(LecteurPVoc PUBLIC JUCE_MODAL_LOOPS_PERMITTED=1)
     target_compile_definitions(SamplerPVoc PUBLIC JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_compile_definitions(EffetPVoc PUBLIC JUCE_MODAL_LOOPS_PERMITTED=1)
+    add_executable(pvoc_fx_test tests/fx_test.cpp Source/Effect/SpectralFx.cpp)
     add_executable(pvoc_effect_test tests/effect_test.cpp Source/PvocEngine.cpp)
     add_executable(pvoc_scrub_test tests/scrub_test.cpp Source/PvocEngine.cpp)
     add_executable(pvoc_plugin_test tests/plugin_test.cpp)
@@ -134,4 +180,11 @@ if(PVOC_TESTS)
     target_link_libraries(pvoc_sampler_test PRIVATE SamplerPVoc juce::juce_recommended_config_flags)
     target_include_directories(pvoc_sampler_test PRIVATE $<TARGET_PROPERTY:SamplerPVoc,INCLUDE_DIRECTORIES>)
     target_compile_definitions(pvoc_sampler_test PRIVATE $<TARGET_PROPERTY:SamplerPVoc,COMPILE_DEFINITIONS>)
+endif()
+
+if(PVOC_TESTS)
+    add_executable(pvoc_fxplugin_test tests/fxplugin_test.cpp)
+    target_link_libraries(pvoc_fxplugin_test PRIVATE EffetPVoc juce::juce_recommended_config_flags)
+    target_include_directories(pvoc_fxplugin_test PRIVATE $<TARGET_PROPERTY:EffetPVoc,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(pvoc_fxplugin_test PRIVATE $<TARGET_PROPERTY:EffetPVoc,COMPILE_DEFINITIONS>)
 endif()

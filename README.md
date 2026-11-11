@@ -1,4 +1,4 @@
-# Lecteur PVoc et Sampler PVoc — Audio Units (et VST3)
+# Lecteur PVoc, Sampler PVoc et Effet PVoc — Audio Units (et VST3)
 
 Plugin à **vocodeur de phase** : time-stretch et pitch-shift indépendants.
 C'est la traduction en C++ du patch Pure Data `docs/pvoc-engine.pd` (même algorithme :
@@ -114,6 +114,43 @@ dans Ableton Live, dans *Plug-ins* comme instrument.
 
 Les sons sont enregistrés dans le projet par leur chemin : garde-les au même endroit.
 
+## Effet PVoc (effet spectral en direct, jouable au clavier)
+
+![Effet PVoc](docs/apercu-effet.png)
+
+Effet temps réel sur l'entrée de la piste (micro, voix, synthé…) :
+
+- **Gel** : bouton GEL, automatisable, ou pédale de sustain (option « Pédale de sustain = gel »).
+  On peut transposer et flouter un son gelé.
+- **Hauteur** : pitch-shift ±24 demi-tons avec verrouillage de phase (formes d'onde préservées).
+- **Décalage de fréquence** (±2000 Hz) : décale toutes les composantes du même nombre de Hz
+  (sons métalliques, inharmoniques).
+- **Robotisation** : remplace la hauteur par un peigne harmonique fixe (hauteur du robot réglable).
+- **Chuchotement** (phases aléatoires), **flou spectral** (traînée de 10 ms à 10 s),
+  **porte spectrale** (supprime les composantes faibles, ex. souffle).
+- **Cross-synthèse** : l'enveloppe spectrale du *modulateur* (sidechain ou fichier audio en boucle)
+  est imposée au son de la piste. Le lissage règle la précision (0 % = magnitudes brutes).
+- **Clavier MIDI** (16 voix) :
+  - *Harmoniseur* : chaque note ajoute une voix transposée (note de référence = son d'origine) ;
+  - *Robot (vocodeur)* : chaque note joue un robot à sa hauteur, articulé par l'entrée ;
+  - *Les deux*. Pitch bend, attaque et relâchement des voix, option « garder le son principal ».
+- **Sortie** : mélange sec/traité, volume. Latence 2047 échantillons (≈ 43 ms à 48 kHz),
+  compensée automatiquement par le DAW.
+
+**Logic Pro** : l'AU est un *effet contrôlé par MIDI* (*Audio FX > MIDI-controlled Effects >
+Lecteur PVoc > Effet PVoc*). Pour jouer le clavier, crée une piste d'instrument logiciel
+(slot d'instrument vide), puis, dans l'en-tête de la fenêtre d'Effet PVoc, choisis cette piste
+dans le menu **MIDI In** (« Entrée MIDI »). Le sidechain se choisit dans le menu *Side Chain*
+du même en-tête.
+
+**Ableton Live** : charge le VST3 (ou l'AU) sur la piste audio ; pour le MIDI, crée une piste MIDI
+dont la sortie « MIDI To » pointe vers la piste qui contient Effet PVoc. Le sidechain se règle
+dans le menu « Sidechain » de l'en-tête du plugin.
+
+**Application autonome** : coche « Mute audio input » dans *Options > Audio/MIDI Settings*
+pour éviter le larsen avec un micro, et utilise un casque. Un clavier MIDI USB est reconnu
+directement ; sans clavier, clique sur le clavier à l'écran.
+
 ## Obtenir le plugin
 
 ### Sans Mac de développement : GitHub Actions
@@ -121,7 +158,7 @@ Les sons sont enregistrés dans le projet par leur chemin : garde-les au même e
 1. Crée un dépôt GitHub et envoie-y ce dossier.
 2. L'onglet *Actions* lance « Construire l'Audio Unit (macOS) » : compilation universelle
    (Apple Silicon + Intel), tests, signature ad hoc et validation Apple (`auval`).
-3. Télécharge l'artefact **PVoc-plugins-macOS** : il contient, pour chacun des deux plugins,
+3. Télécharge l'artefact **PVoc-plugins-macOS** : il contient, pour chacun des trois plugins,
    l'AU, le VST3 et une application autonome.
 
 ### Sur un Mac avec Xcode
@@ -136,12 +173,13 @@ JUCE 8 est téléchargé automatiquement (ou `-DJUCE_DIR=/chemin/vers/JUCE`).
 
 ## Installer l'Audio Unit
 
-1. Copie `Lecteur PVoc.component` et `Sampler PVoc.component` dans `~/Library/Audio/Plug-Ins/Components/`
+1. Copie `Lecteur PVoc.component`, `Sampler PVoc.component` et `Effet PVoc.component` dans `~/Library/Audio/Plug-Ins/Components/`
    (Finder : *Aller > Aller au dossier…*, puis colle ce chemin).
 2. Le plugin n'est pas notarisé par Apple : retire la quarantaine dans le Terminal :
    ```
    xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/"Lecteur PVoc.component"
    xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/"Sampler PVoc.component"
+   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/"Effet PVoc.component"
    ```
 3. Relance ton DAW. Dans Logic Pro : *Logic Pro > Réglages > Gestionnaire de plug-ins*,
    puis « Réinitialiser et rescanner la sélection » si le plugin n'apparaît pas.
@@ -158,8 +196,10 @@ pendant la lecture. Place le plugin sur une piste auxiliaire (bus), ou active
 - `Source/PvocEngine.*` : le moteur (C++ pur, sans dépendance, sans allocation dans le thread audio).
 - `Source/Resampler.h` : rééchantillonnage polyphasé (sinus cardinal + Kaiser, anti-repliement).
 - `Source/PluginProcessor.*`, `Source/PluginEditor.*` : le plugin JUCE.
+- `Source/Sampler/*` : Sampler PVoc. `Source/Effect/*` : Effet PVoc (moteur `SpectralFx`).
 - Tests : `cmake -S . -B build-tests -DPVOC_TESTS=ON`, puis lancer `pvoc_effect_test`
-  (moteur : latence, hauteur, gel, mélange) et `pvoc_plugin_test` (plugin complet).
+  (moteur : latence, hauteur, gel, mélange) et `pvoc_plugin_test` (plugin complet), `pvoc_sampler_test`, `pvoc_fx_test` (moteur de l'effet)
+  et `pvoc_fxplugin_test` (plugin effet complet).
 
 JUCE est distribué sous double licence (AGPLv3 ou licence commerciale) :
 un usage personnel ne pose aucun problème.
